@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open Fusion Code Quality"
+  short_description: "Apply SOLID, DRY, and clean design"
+  default_prompt: "Use $open-fusion-code-quality to keep Open Fusion code clean, SOLID, and maintainable."

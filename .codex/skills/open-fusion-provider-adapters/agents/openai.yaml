@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open Fusion Provider Adapters"
+  short_description: "Add Vercel AI SDK providers"
+  default_prompt: "Use $open-fusion-provider-adapters to add or maintain Open Fusion provider adapters."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open Fusion Test Strategy"
+  short_description: "Design unit, integration, and contract tests"
+  default_prompt: "Use $open-fusion-test-strategy to choose the right tests for Open Fusion behavior."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open Fusion NestJS API"
+  short_description: "Build OpenAI-compatible NestJS API"
+  default_prompt: "Use $open-fusion-nestjs-api to implement Open Fusion's OpenAI-compatible NestJS endpoints."

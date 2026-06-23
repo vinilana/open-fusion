@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open Fusion Config JSON"
+  short_description: "Manage single-file gateway config"
+  default_prompt: "Use $open-fusion-config-json to implement or update Open Fusion's JSON configuration flow."

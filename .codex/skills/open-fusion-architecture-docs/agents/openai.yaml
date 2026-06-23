@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open Fusion Architecture Docs"
+  short_description: "Align PRD, specs, and ADRs"
+  default_prompt: "Use $open-fusion-architecture-docs to update Open Fusion PRD, specs, and ADRs consistently."

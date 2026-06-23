@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open Fusion Ops Guardrails"
+  short_description: "Enforce logs, security, resilience"
+  default_prompt: "Use $open-fusion-ops-guardrails to add observability, security, and resilience guardrails to Open Fusion."

@@ -1,0 +1,78 @@
+---
+name: open-fusion-ops-guardrails
+description: Add and enforce Open Fusion operational guardrails. Use when Codex works on request ids, structured logging, metrics, health checks, authentication, authorization, payload limits, timeout/retry policy, redaction, provider failure handling, rate limiting, or security/resilience tests for the Open Fusion LLM gateway.
+---
+
+# Open Fusion Ops Guardrails
+
+## Required Context
+
+Before editing operational, security, or resilience code, read:
+
+- `docs/PRD.md`
+- `docs/specs/006-observability-resilience-security.md`
+- `docs/specs/001-openai-compatible-api.md`
+- `docs/adrs/0002-openai-compatible-public-api.md`
+
+Read config and orchestration specs when changing limits:
+
+- `docs/specs/003-single-json-configuration.md`
+- `docs/specs/002-llm-orchestration-routing.md`
+
+## Request Lifecycle Guardrails
+
+Every `/v1/*` request should have:
+
+- authentication, except explicitly public health endpoints;
+- request id generation or propagation;
+- payload validation and size limits;
+- route/model authorization;
+- timeout enforcement;
+- structured completion log;
+- normalized OpenAI-style error response on failure.
+
+## Logging
+
+Log structured fields:
+
+- `requestId`;
+- authenticated client id;
+- public route/model;
+- orchestrator model key;
+- delegate model keys;
+- provider;
+- status;
+- latency;
+- token usage when available;
+- normalized error code/type.
+
+Do not log provider API keys, bearer tokens, authorization headers, raw full prompts, or raw full responses by default.
+
+## Error Handling
+
+Normalize failures into OpenAI-compatible error envelopes where possible. Preserve enough internal detail in logs to debug provider failures, but keep public messages stable and non-sensitive.
+
+Use appropriate status codes:
+
+- 400 invalid request;
+- 401 missing or invalid token;
+- 403 unauthorized model/route;
+- 404 unknown public model;
+- 408 timeout;
+- 429 limit exceeded;
+- 502 provider failure;
+- 503 provider unavailable;
+- 500 internal error.
+
+## Health Checks
+
+Provide:
+
+- `GET /health/live` for process liveness;
+- `GET /health/ready` for boot readiness and config validity.
+
+Do not perform paid provider calls from health checks by default.
+
+## Testing
+
+Add tests for redaction, request id propagation, auth rejection, payload limits, timeout mapping, provider error mapping, and health endpoint behavior.

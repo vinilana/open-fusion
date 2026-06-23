@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open Fusion LLM Orchestration"
+  short_description: "Implement orchestrator routing logic"
+  default_prompt: "Use $open-fusion-llm-orchestration to build or adjust Open Fusion's LLM orchestration flow."

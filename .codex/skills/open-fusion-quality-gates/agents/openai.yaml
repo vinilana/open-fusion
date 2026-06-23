@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open Fusion Quality Gates"
+  short_description: "Verify tests, lint, types, and risk"
+  default_prompt: "Use $open-fusion-quality-gates to verify Open Fusion changes before considering them done."

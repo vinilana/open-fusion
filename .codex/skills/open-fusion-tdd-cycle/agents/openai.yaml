@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open Fusion TDD Cycle"
+  short_description: "Drive changes with red-green-refactor"
+  default_prompt: "Use $open-fusion-tdd-cycle to implement Open Fusion changes with a strict TDD loop."
