@@ -3,11 +3,20 @@ import { Test } from "@nestjs/testing";
 import request from "supertest";
 
 import { AppModule } from "../src/app.module";
+import { validEnv, writeConfig } from "./support/gateway-config.fixture";
 
 describe("OpenAI-compatible API", () => {
   let app: INestApplication;
+  let cleanupConfig: (() => void) | undefined;
+  let previousEnv: NodeJS.ProcessEnv;
 
   beforeAll(async () => {
+    previousEnv = { ...process.env };
+    const config = writeConfig();
+    cleanupConfig = config.cleanup;
+    process.env.OPEN_FUSION_CONFIG = config.path;
+    Object.assign(process.env, validEnv());
+
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
@@ -18,6 +27,8 @@ describe("OpenAI-compatible API", () => {
 
   afterAll(async () => {
     await app?.close();
+    cleanupConfig?.();
+    process.env = previousEnv;
   });
 
   it("rejects unauthenticated /v1 requests with an OpenAI-compatible error", async () => {
