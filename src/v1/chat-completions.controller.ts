@@ -9,11 +9,11 @@ export class ChatCompletionsController {
   constructor(private readonly completions: ChatCompletionsService) {}
 
   @Post()
-  create(
+  async create(
     @Body() body: unknown,
     @Req() request: Request,
     @Res() response: Response,
-  ): void {
+  ): Promise<void> {
     const client = request.authenticatedClient;
     if (!client) {
       throw OpenAiHttpError.authentication();
@@ -25,13 +25,14 @@ export class ChatCompletionsController {
       response.setHeader("cache-control", "no-cache, no-transform");
       response.setHeader("connection", "keep-alive");
 
-      for (const chunk of this.completions.stream(body, client)) {
+      const chunks = await this.completions.stream(body, client);
+      for (const chunk of chunks) {
         response.write(`data: ${JSON.stringify(chunk)}\n\n`);
       }
       response.end("data: [DONE]\n\n");
       return;
     }
 
-    response.status(200).json(this.completions.complete(body, client));
+    response.status(200).json(await this.completions.complete(body, client));
   }
 }

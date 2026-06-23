@@ -4,6 +4,7 @@ import { Injectable } from "@nestjs/common";
 
 import { GatewayConfigService } from "../config/gateway-config.service";
 import { OpenAiHttpError } from "../errors/openai-http-error";
+import { OrchestrationService } from "../orchestration/orchestration.service";
 import {
   ChatCompletionChunk,
   ChatCompletionRequest,
@@ -17,12 +18,19 @@ interface AuthenticatedClient {
 
 @Injectable()
 export class ChatCompletionsService {
-  constructor(private readonly config: GatewayConfigService) {}
+  constructor(
+    private readonly config: GatewayConfigService,
+    private readonly orchestration: OrchestrationService,
+  ) {}
 
-  complete(body: unknown, client: AuthenticatedClient): ChatCompletionResponse {
+  async complete(
+    body: unknown,
+    client: AuthenticatedClient,
+  ): Promise<ChatCompletionResponse> {
     const request = this.validate(body);
     this.assertModelAccess(request.model, client);
 
+    const orchestration = await this.orchestration.run(request);
     const created = unixTimestamp();
     return {
       id: createCompletionId(),
@@ -34,26 +42,29 @@ export class ChatCompletionsService {
           index: 0,
           message: {
             role: "assistant",
-            content: this.createStubContent(request),
+            content: orchestration.content,
           },
-          finish_reason: "stop",
+          finish_reason: orchestration.finishReason,
         },
       ],
       usage: {
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        total_tokens: 0,
+        prompt_tokens: orchestration.usage.promptTokens,
+        completion_tokens: orchestration.usage.completionTokens,
+        total_tokens: orchestration.usage.totalTokens,
       },
     };
   }
 
-  stream(body: unknown, client: AuthenticatedClient): ChatCompletionChunk[] {
+  async stream(
+    body: unknown,
+    client: AuthenticatedClient,
+  ): Promise<ChatCompletionChunk[]> {
     const request = this.validate(body);
     this.assertModelAccess(request.model, client);
 
+    const orchestration = await this.orchestration.run(request);
     const id = createCompletionId();
     const created = unixTimestamp();
-    const content = this.createStubContent(request);
 
     return [
       {
@@ -66,7 +77,7 @@ export class ChatCompletionsService {
             index: 0,
             delta: {
               role: "assistant",
-              content,
+              content: orchestration.content,
             },
             finish_reason: null,
           },
@@ -225,10 +236,6 @@ export class ChatCompletionsService {
     if (!client.allowedModels.includes(model.id)) {
       throw OpenAiHttpError.forbidden(modelId);
     }
-  }
-
-  private createStubContent(request: ChatCompletionRequest): string {
-    return `Open Fusion received ${request.messages.length} message for ${request.model}.`;
   }
 }
 
