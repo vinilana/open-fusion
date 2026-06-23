@@ -3,6 +3,8 @@ import { Test } from "@nestjs/testing";
 import request from "supertest";
 
 import { AppModule } from "../src/app.module";
+import { LLM_GENERATION_PORT } from "../src/orchestration/llm-generation.port";
+import { StubLlmGenerationPort } from "../src/orchestration/stub-llm-generation.port";
 import { validEnv, writeConfig } from "./support/gateway-config.fixture";
 
 describe("OpenAI-compatible API", () => {
@@ -19,7 +21,10 @@ describe("OpenAI-compatible API", () => {
 
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(LLM_GENERATION_PORT)
+      .useClass(StubLlmGenerationPort)
+      .compile();
 
     app = moduleRef.createNestApplication();
     await app.init();
