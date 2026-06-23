@@ -104,6 +104,7 @@ export interface ModelAccessPolicy {
 export interface GatewayConfigServiceOptions {
   configPath?: string;
   env?: Record<string, string | undefined>;
+  envFilePath?: string;
   rawConfig?: RawGatewayConfig;
 }
 
@@ -138,7 +139,7 @@ export class GatewayConfigService {
     @Inject(GATEWAY_CONFIG_OPTIONS)
     options: GatewayConfigServiceOptions = {},
   ) {
-    const env = options.env ?? process.env;
+    const env = resolveConfigEnvironment(options);
     const rawConfig =
       options.rawConfig ??
       loadRawConfig(
@@ -205,6 +206,87 @@ export class GatewayConfigService {
   getHttpPort(): number {
     return this.runtime.server.port;
   }
+}
+
+function resolveConfigEnvironment(
+  options: GatewayConfigServiceOptions,
+): Record<string, string | undefined> {
+  const baseEnv = options.env ?? process.env;
+  const envFilePath =
+    options.envFilePath ?? (options.env === undefined ? ".env" : undefined);
+
+  if (!envFilePath) {
+    return baseEnv;
+  }
+
+  return mergeEnv(loadDotEnvFile(envFilePath), baseEnv);
+}
+
+function loadDotEnvFile(envFilePath: string): Record<string, string> {
+  if (!existsSync(envFilePath)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    readFileSync(envFilePath, "utf8")
+      .split(/\r?\n/u)
+      .flatMap((line) => parseDotEnvLine(line)),
+  );
+}
+
+function parseDotEnvLine(line: string): Array<[string, string]> {
+  const trimmed = line.trim();
+  if (trimmed === "" || trimmed.startsWith("#")) {
+    return [];
+  }
+
+  const normalized = trimmed.startsWith("export ")
+    ? trimmed.slice("export ".length).trimStart()
+    : trimmed;
+  const separator = normalized.indexOf("=");
+  if (separator <= 0) {
+    return [];
+  }
+
+  const key = normalized.slice(0, separator).trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) {
+    return [];
+  }
+
+  return [[key, parseDotEnvValue(normalized.slice(separator + 1).trim())]];
+}
+
+function parseDotEnvValue(rawValue: string): string {
+  if (rawValue.startsWith('"') && rawValue.endsWith('"')) {
+    return rawValue
+      .slice(1, -1)
+      .replace(/\\n/gu, "\n")
+      .replace(/\\r/gu, "\r")
+      .replace(/\\t/gu, "\t")
+      .replace(/\\"/gu, '"')
+      .replace(/\\\\/gu, "\\");
+  }
+
+  if (rawValue.startsWith("'") && rawValue.endsWith("'")) {
+    return rawValue.slice(1, -1);
+  }
+
+  return rawValue.replace(/\s+#.*$/u, "").trim();
+}
+
+function mergeEnv(
+  fileEnv: Record<string, string>,
+  baseEnv: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  const merged: Record<string, string | undefined> = { ...fileEnv };
+
+  Object.entries(baseEnv).forEach(([key, value]) => {
+    if (value !== undefined) {
+      merged[key] = value;
+    }
+  });
+
+  return merged;
 }
 
 function loadRawConfig(configPath: string): RawGatewayConfig {

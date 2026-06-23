@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import {
   GatewayConfigError,
   GatewayConfigService,
@@ -33,6 +37,41 @@ describe("GatewayConfigService", () => {
       );
     } finally {
       cleanup();
+    }
+  });
+
+  it("resolves required secrets from a dotenv file", () => {
+    const { path, cleanup } = writeConfig(minimalConfig());
+    const directory = mkdtempSync(join(tmpdir(), "open-fusion-env-"));
+    const envFilePath = join(directory, ".env");
+    writeFileSync(
+      envFilePath,
+      [
+        "OPENROUTER_API_KEY=sk-openrouter-from-env-file",
+        "OPEN_FUSION_DEV_API_KEY=dev-token-from-env-file",
+        "OPEN_FUSION_RESTRICTED_API_KEY=restricted-token-from-env-file",
+      ].join("\n"),
+      "utf8",
+    );
+
+    try {
+      const config = new GatewayConfigService({
+        configPath: path,
+        env: {},
+        envFilePath,
+      });
+
+      expect(config.getProvider("openrouter")).toMatchObject({
+        apiKey: "sk-openrouter-from-env-file",
+      });
+      expect(config.findClientByApiKey("dev-token-from-env-file")).toEqual({
+        id: "local-dev",
+        apiKey: "dev-token-from-env-file",
+        allowedModels: ["route/default"],
+      });
+    } finally {
+      cleanup();
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 
