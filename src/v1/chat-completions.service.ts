@@ -141,7 +141,7 @@ export class ChatCompletionsService {
           {
             index: 0,
             delta: {},
-            finish_reason: "stop",
+            finish_reason: orchestration.finishReason,
           },
         ],
       },
