@@ -16,6 +16,14 @@ interface AuthenticatedClient {
   allowedModels: string[];
 }
 
+export interface ChatCompletionRequestContext {
+  requestId: string;
+  routeId: string;
+  publicModel: string;
+  stream: boolean;
+  request: ChatCompletionRequest;
+}
+
 @Injectable()
 export class ChatCompletionsService {
   constructor(
@@ -23,20 +31,40 @@ export class ChatCompletionsService {
     private readonly orchestration: OrchestrationService,
   ) {}
 
+  createRequestContext(
+    body: unknown,
+    client: AuthenticatedClient,
+    requestId: string,
+  ): ChatCompletionRequestContext {
+    const request = this.validate(body);
+    const route = this.assertModelAccess(request.model, client);
+
+    return {
+      requestId,
+      routeId: route.id,
+      publicModel: request.model,
+      stream: request.stream === true,
+      request,
+    };
+  }
+
   async complete(
     body: unknown,
     client: AuthenticatedClient,
   ): Promise<ChatCompletionResponse> {
-    const request = this.validate(body);
-    this.assertModelAccess(request.model, client);
+    return this.completeRequest(this.createRequestContext(body, client, ""));
+  }
 
-    const orchestration = await this.orchestration.run(request);
+  async completeRequest(
+    context: ChatCompletionRequestContext,
+  ): Promise<ChatCompletionResponse> {
+    const orchestration = await this.orchestration.run(context.request);
     const created = unixTimestamp();
     return {
       id: createCompletionId(),
       object: "chat.completion",
       created,
-      model: request.model,
+      model: context.publicModel,
       choices: [
         {
           index: 0,
@@ -59,10 +87,13 @@ export class ChatCompletionsService {
     body: unknown,
     client: AuthenticatedClient,
   ): Promise<ChatCompletionChunk[]> {
-    const request = this.validate(body);
-    this.assertModelAccess(request.model, client);
+    return this.streamRequest(this.createRequestContext(body, client, ""));
+  }
 
-    const orchestration = await this.orchestration.run(request);
+  async streamRequest(
+    context: ChatCompletionRequestContext,
+  ): Promise<ChatCompletionChunk[]> {
+    const orchestration = await this.orchestration.run(context.request);
     const id = createCompletionId();
     const created = unixTimestamp();
 
@@ -71,7 +102,7 @@ export class ChatCompletionsService {
         id,
         object: "chat.completion.chunk",
         created,
-        model: request.model,
+        model: context.publicModel,
         choices: [
           {
             index: 0,
@@ -87,7 +118,7 @@ export class ChatCompletionsService {
         id,
         object: "chat.completion.chunk",
         created,
-        model: request.model,
+        model: context.publicModel,
         choices: [
           {
             index: 0,
@@ -182,6 +213,9 @@ export class ChatCompletionsService {
     if ("tools" in body && !Array.isArray(body.tools)) {
       throw OpenAiHttpError.invalidRequest("tools must be an array.", "tools");
     }
+    if (Array.isArray(body.tools)) {
+      this.validateClientTools(body.tools);
+    }
 
     if (
       "tool_choice" in body &&
@@ -190,6 +224,12 @@ export class ChatCompletionsService {
     ) {
       throw OpenAiHttpError.invalidRequest(
         "tool_choice must be a string or an object.",
+        "tool_choice",
+      );
+    }
+    if (this.referencesInternalDelegateTool(body.tool_choice)) {
+      throw OpenAiHttpError.invalidRequest(
+        "delegate_llm is an internal tool and cannot be supplied by the client.",
         "tool_choice",
       );
     }
@@ -224,10 +264,44 @@ export class ChatCompletionsService {
     }
   }
 
+  private validateClientTools(tools: unknown[]): void {
+    for (const [index, tool] of tools.entries()) {
+      if (!isRecord(tool)) {
+        throw OpenAiHttpError.invalidRequest(
+          `tools[${index}] must be an object.`,
+          "tools",
+        );
+      }
+
+      if (this.referencesInternalDelegateTool(tool)) {
+        throw OpenAiHttpError.invalidRequest(
+          "delegate_llm is an internal tool and cannot be supplied by the client.",
+          "tools",
+        );
+      }
+    }
+  }
+
+  private referencesInternalDelegateTool(value: unknown): boolean {
+    if (!isRecord(value)) {
+      return false;
+    }
+
+    if (value.name === "delegate_llm") {
+      return true;
+    }
+
+    if (isRecord(value.function) && value.function.name === "delegate_llm") {
+      return true;
+    }
+
+    return false;
+  }
+
   private assertModelAccess(
     modelId: string,
     client: AuthenticatedClient,
-  ): void {
+  ): { id: string } {
     const model = this.config.findPublicModel(modelId);
     if (!model) {
       throw OpenAiHttpError.modelNotFound(modelId);
@@ -236,6 +310,13 @@ export class ChatCompletionsService {
     if (!client.allowedModels.includes(model.id)) {
       throw OpenAiHttpError.forbidden(modelId);
     }
+
+    const route = this.config.resolveRouteByPublicModel(modelId);
+    if (!route) {
+      throw OpenAiHttpError.modelNotFound(modelId);
+    }
+
+    return route;
   }
 }
 

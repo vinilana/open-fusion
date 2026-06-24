@@ -152,6 +152,62 @@ describe("OpenAI-compatible API", () => {
     });
   });
 
+  it("returns a JSON error before opening SSE when a streaming request is invalid", async () => {
+    const response = await request(app.getHttpServer())
+      .post("/v1/chat/completions")
+      .set("Authorization", "Bearer test-gateway-key")
+      .send({
+        model: "internal/not-exposed",
+        stream: true,
+        messages: [{ role: "user", content: "hello" }],
+      })
+      .expect(404);
+
+    expect(response.headers["content-type"]).toContain("application/json");
+    expect(response.body).toEqual({
+      error: {
+        message: "Model 'internal/not-exposed' was not found.",
+        type: "invalid_request_error",
+        param: "model",
+        code: "model_not_found",
+      },
+    });
+  });
+
+  it("rejects attempts to expose the internal delegate_llm tool from the client request", async () => {
+    const response = await request(app.getHttpServer())
+      .post("/v1/chat/completions")
+      .set("Authorization", "Bearer test-gateway-key")
+      .send({
+        model: "route/default",
+        messages: [{ role: "user", content: "hello" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "delegate_llm",
+              description: "attempt to call an internal gateway tool",
+            },
+          },
+        ],
+        tool_choice: {
+          type: "function",
+          function: { name: "delegate_llm" },
+        },
+      })
+      .expect(400);
+
+    expect(response.body).toEqual({
+      error: {
+        message:
+          "delegate_llm is an internal tool and cannot be supplied by the client.",
+        type: "invalid_request_error",
+        param: "tools",
+        code: "invalid_request",
+      },
+    });
+  });
+
   it("returns a Chat Completions envelope for non-streaming requests", async () => {
     const response = await request(app.getHttpServer())
       .post("/v1/chat/completions")

@@ -19,13 +19,19 @@ export class ChatCompletionsController {
       throw OpenAiHttpError.authentication();
     }
 
-    if (this.completions.isStreamingRequest(body)) {
+    const context = this.completions.createRequestContext(
+      body,
+      client,
+      request.requestId ?? "",
+    );
+
+    if (context.stream) {
       response.status(200);
       response.setHeader("content-type", "text/event-stream; charset=utf-8");
       response.setHeader("cache-control", "no-cache, no-transform");
       response.setHeader("connection", "keep-alive");
 
-      const chunks = await this.completions.stream(body, client);
+      const chunks = await this.completions.streamRequest(context);
       for (const chunk of chunks) {
         response.write(`data: ${JSON.stringify(chunk)}\n\n`);
       }
@@ -33,6 +39,6 @@ export class ChatCompletionsController {
       return;
     }
 
-    response.status(200).json(await this.completions.complete(body, client));
+    response.status(200).json(await this.completions.completeRequest(context));
   }
 }
