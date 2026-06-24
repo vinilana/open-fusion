@@ -87,7 +87,8 @@ O MVP deve entregar:
 - [Spec 003: Configuracao JSON unica](./specs/003-single-json-configuration.md)
 - [Spec 004: Providers e OpenRouter](./specs/004-provider-adapters-openrouter.md)
 - [Spec 005: Streaming, tools e normalizacao de respostas](./specs/005-streaming-tools-response-normalization.md)
-- [Spec 006: Observabilidade, resiliencia e seguranca](./specs/006-observability-resilience-security.md)
+- [Spec 006: Streaming final com delegacoes internas](./specs/006-streaming-final-with-internal-delegations.md) - proxima em implementacao
+- [Spec 007: Observabilidade, resiliencia e seguranca](./specs/007-observability-resilience-security.md)
 
 ## 10. Referencias de ADR
 
@@ -106,4 +107,3 @@ O MVP deve entregar:
 - Vercel AI SDK OpenRouter provider: https://ai-sdk.dev/providers/community-providers/openrouter
 - OpenRouter quickstart: https://openrouter.ai/docs/quickstart
 - OpenRouter API reference: https://openrouter.ai/docs/api/reference/overview
-

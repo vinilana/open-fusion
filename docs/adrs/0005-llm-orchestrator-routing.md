@@ -30,5 +30,4 @@ Negativas:
 
 - [Spec 002](../specs/002-llm-orchestration-routing.md)
 - [Spec 005](../specs/005-streaming-tools-response-normalization.md)
-- [Spec 006](../specs/006-observability-resilience-security.md)
-
+- [Spec 007](../specs/007-observability-resilience-security.md)
