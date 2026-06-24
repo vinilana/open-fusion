@@ -22,13 +22,24 @@ Antes de implementar qualquer mudanca relevante, leia nesta ordem:
 4. Os testes existentes da area afetada.
 5. O codigo existente, quando houver.
 
-Se uma mudanca alterar comportamento, contrato publico, decisao arquitetural ou requisito operacional, atualize tambem a spec, ADR ou PRD correspondente.
+Se uma mudanca alterar comportamento, contrato publico, decisao arquitetural ou requisito operacional, atualize a documentacao correspondente respeitando a governanca de specs abaixo.
+
+## Governanca de Specs
+
+Nao adicione novos requisitos a specs que ja governam trabalho implementado. Specs ja implementadas so podem receber correcoes de typo, formatacao, links quebrados ou correcoes historicas explicitamente aprovadas.
+
+Para novos requisitos:
+
+- se o requisito pertence a spec atualmente em implementacao, documente-o nessa spec ativa;
+- se o requisito pertence a uma area cuja spec ja foi implementada, crie uma nova spec numerada em `docs/specs/` e referencie-a no `docs/PRD.md`;
+- se o requisito altera uma decisao arquitetural duradoura ou contradiz ADR aceito, crie um novo ADR ou um ADR supersedente.
 
 ## Skills Locais
 
 Use as skills em `.codex/skills` quando o trabalho tocar seus dominios:
 
 - `open-fusion-architecture-docs`: PRD, specs, ADRs e alinhamento arquitetural.
+- `open-fusion-spec-governance`: governanca de specs, decisao entre spec ativa, nova spec ou ADR.
 - `open-fusion-nestjs-api`: endpoints NestJS e API OpenAI-compatible.
 - `open-fusion-config-json`: configuracao JSON unica, schema, validacao e segredos.
 - `open-fusion-llm-orchestration`: orquestrador, `delegate_llm`, rotas e limites de delegacao.
