@@ -37,18 +37,15 @@ export class ChatCompletionsController {
 
     try {
       if (context.stream) {
-        const chunks = await this.completions.streamRequest(context);
-
-        this.logSuccess(context, client.id, startedAt);
-
         response.status(200);
         response.setHeader("content-type", "text/event-stream; charset=utf-8");
         response.setHeader("cache-control", "no-cache, no-transform");
         response.setHeader("connection", "keep-alive");
 
-        for (const chunk of chunks) {
+        for await (const chunk of this.completions.streamRequest(context)) {
           response.write(`data: ${JSON.stringify(chunk)}\n\n`);
         }
+        this.logSuccess(context, client.id, startedAt);
         response.end("data: [DONE]\n\n");
         return;
       }

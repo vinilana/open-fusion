@@ -26,6 +26,11 @@ export interface OrchestrationResult {
   usage: LlmUsage;
 }
 
+export interface OrchestrationStreamChunk {
+  content: string;
+  finishReason: LlmFinishReason | null;
+}
+
 export interface OrchestrationRunContext {
   requestId?: string;
   routeId?: string;
@@ -131,6 +136,71 @@ export class OrchestrationService {
         toolResults.push(result);
       }
     }
+  }
+
+  async *streamFinal(
+    request: ChatCompletionRequest,
+    context: OrchestrationRunContext = {},
+  ): AsyncIterable<OrchestrationStreamChunk> {
+    const route = this.config.resolveRouteByPublicModel(request.model);
+    if (!route) {
+      throw OpenAiHttpError.modelNotFound(request.model);
+    }
+
+    if (route.maxDepth !== 1) {
+      throw OpenAiHttpError.invalidRequest(
+        "Only maxDepth 1 is supported in the MVP.",
+        "maxDepth",
+      );
+    }
+
+    if (!this.generation.stream) {
+      const result = await this.run(request, context);
+      if (result.content !== "") {
+        yield {
+          content: result.content,
+          finishReason: null,
+        };
+      }
+      yield {
+        content: "",
+        finishReason: result.finishReason,
+      };
+      return;
+    }
+
+    const delegateModels = this.config.listAllowedDelegateModels(route);
+    const deadline = Date.now() + route.timeoutMs;
+    const orchestratorTimeoutMs = remainingMs(deadline, route);
+
+    for await (const content of this.generation.stream({
+      modelId: route.orchestrator,
+      publicModelId: route.publicModel,
+      requestId: context.requestId,
+      routeId: context.routeId ?? route.id,
+      role: "orchestrator",
+      messages: request.messages,
+      system: buildOrchestratorSystemPrompt(route, delegateModels),
+      delegateModels,
+      internalTools: ["delegate_llm"],
+      clientTools: context.clientTools,
+      streamFinalOnly: context.streamFinalOnly ?? route.streamFinalOnly,
+      timeoutMs: orchestratorTimeoutMs,
+    })) {
+      if (content === "") {
+        continue;
+      }
+
+      yield {
+        content,
+        finishReason: null,
+      };
+    }
+
+    yield {
+      content: "",
+      finishReason: "stop",
+    };
   }
 
   private async executeDelegateCall(

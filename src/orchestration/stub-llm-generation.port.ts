@@ -19,4 +19,10 @@ export class StubLlmGenerationPort implements LlmGenerationPort {
       },
     };
   }
+
+  async *stream(request: LlmGenerateRequest): AsyncIterable<string> {
+    yield `Open Fusion received ${request.messages.length} message for `;
+    yield request.publicModelId;
+    yield ".";
+  }
 }

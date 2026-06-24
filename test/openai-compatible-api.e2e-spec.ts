@@ -312,6 +312,9 @@ describe("OpenAI-compatible API", () => {
     expect(response.headers["content-type"]).toContain("text/event-stream");
     expect(response.text).toContain('"object":"chat.completion.chunk"');
     expect(response.text).toContain('"delta":{"role":"assistant"');
+    expect(accumulateStreamContent(response.text)).toBe(
+      "Open Fusion received 1 message for route/default.",
+    );
     expect(response.text.trim().endsWith("data: [DONE]")).toBe(true);
   });
 
@@ -342,3 +345,20 @@ describe("OpenAI-compatible API", () => {
     logSpy.mockRestore();
   });
 });
+
+function accumulateStreamContent(streamBody: string): string {
+  return streamBody
+    .split("\n\n")
+    .map((event) => event.trim())
+    .filter((event) => event.startsWith("data: "))
+    .map((event) => event.slice("data: ".length))
+    .filter((data) => data !== "[DONE]")
+    .map(
+      (data) =>
+        JSON.parse(data) as {
+          choices?: Array<{ delta?: { content?: string } }>;
+        },
+    )
+    .map((chunk) => chunk.choices?.[0]?.delta?.content ?? "")
+    .join("");
+}

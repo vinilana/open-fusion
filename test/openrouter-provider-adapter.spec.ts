@@ -53,6 +53,37 @@ describe("OpenRouter provider adapter", () => {
     });
   });
 
+  it("moves client system messages into the AI SDK system option", async () => {
+    const sdk = createFakeSdk({
+      text: "provider answer",
+      finishReason: "stop",
+      totalUsage: usage(4, 6, 10),
+    });
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+
+    await adapter.generate(
+      config.getProvider("openrouter")!,
+      config.findInternalModel("worker.fast")!,
+      {
+        ...createGenerateRequest("worker.fast"),
+        system: "gateway system",
+        messages: [
+          { role: "system", content: "client system" },
+          { role: "user", content: "hello" },
+        ],
+      },
+    );
+
+    expect(sdk.generateTextCalls[0]).toMatchObject({
+      system: expect.stringContaining("gateway system"),
+      messages: [{ role: "user", content: "hello" }],
+    });
+    expect(sdk.generateTextCalls[0]).toMatchObject({
+      system: expect.stringContaining("client system"),
+    });
+  });
+
   it("maps delegate_llm tool calls from AI SDK results", async () => {
     const sdk = createFakeSdk({
       text: "",
@@ -116,6 +147,40 @@ describe("OpenRouter provider adapter", () => {
     expect(sdk.streamTextCalls[0]).toMatchObject({
       model: { providerModelId: "openai/gpt-4.1-mini" },
       timeout: 30000,
+    });
+  });
+
+  it("moves client system messages into the AI SDK system option for streams", async () => {
+    const sdk = createFakeSdk({
+      text: "unused",
+      finishReason: "stop",
+      totalUsage: usage(0, 0, 0),
+      streamChunks: ["hello"],
+    });
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+
+    for await (const chunk of adapter.stream(
+      config.getProvider("openrouter")!,
+      config.findInternalModel("worker.fast")!,
+      {
+        ...createGenerateRequest("worker.fast"),
+        system: "gateway system",
+        messages: [
+          { role: "system", content: "client system" },
+          { role: "user", content: "hello" },
+        ],
+      },
+    )) {
+      expect(chunk).toBe("hello");
+    }
+
+    expect(sdk.streamTextCalls[0]).toMatchObject({
+      system: expect.stringContaining("gateway system"),
+      messages: [{ role: "user", content: "hello" }],
+    });
+    expect(sdk.streamTextCalls[0]).toMatchObject({
+      system: expect.stringContaining("client system"),
     });
   });
 

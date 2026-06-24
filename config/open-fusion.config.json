@@ -61,7 +61,8 @@
       "maxDepth": 1,
       "timeoutMs": 60000,
       "delegateTimeoutMs": 30000,
-      "streamFinalOnly": true
+      "streamFinalOnly": true,
+      "allowClientTools": true
     }
   },
   "observability": {

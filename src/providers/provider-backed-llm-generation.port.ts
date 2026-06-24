@@ -26,4 +26,15 @@ export class ProviderBackedLlmGenerationPort implements LlmGenerationPort {
 
     return this.providers.generate(model, request);
   }
+
+  stream(request: LlmGenerateRequest): AsyncIterable<string> {
+    const model = this.config.findInternalModel(request.modelId);
+    if (!model) {
+      throw OpenAiHttpError.providerError(
+        `Configured model '${request.modelId}' was not found.`,
+      );
+    }
+
+    return this.providers.stream(model, request);
+  }
 }

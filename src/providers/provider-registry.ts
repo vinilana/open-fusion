@@ -37,4 +37,24 @@ export class ProviderRegistry {
       `Provider type '${provider.type}' is not supported.`,
     );
   }
+
+  stream(
+    model: InternalModelConfig,
+    request: LlmGenerateRequest,
+  ): AsyncIterable<string> {
+    const provider = this.config.getProvider(model.provider);
+    if (!provider) {
+      throw OpenAiHttpError.providerError(
+        `Provider '${model.provider}' is not configured.`,
+      );
+    }
+
+    if (provider.type === this.openRouter.type && this.openRouter.stream) {
+      return this.openRouter.stream(provider, model, request);
+    }
+
+    throw OpenAiHttpError.providerError(
+      `Provider type '${provider.type}' does not support streaming.`,
+    );
+  }
 }

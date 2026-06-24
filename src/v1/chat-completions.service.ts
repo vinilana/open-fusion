@@ -7,6 +7,7 @@ import {
   RouteConfig,
 } from "../config/gateway-config.service";
 import { OpenAiHttpError } from "../errors/openai-http-error";
+import { LlmFinishReason } from "../orchestration/llm-generation.port";
 import { OrchestrationService } from "../orchestration/orchestration.service";
 import {
   ChatCompletionChunk,
@@ -100,13 +101,19 @@ export class ChatCompletionsService {
     body: unknown,
     client: AuthenticatedClient,
   ): Promise<ChatCompletionChunk[]> {
-    return this.streamRequest(this.createRequestContext(body, client, ""));
+    const chunks: ChatCompletionChunk[] = [];
+    for await (const chunk of this.streamRequest(
+      this.createRequestContext(body, client, ""),
+    )) {
+      chunks.push(chunk);
+    }
+    return chunks;
   }
 
-  async streamRequest(
+  async *streamRequest(
     context: ChatCompletionRequestContext,
-  ): Promise<ChatCompletionChunk[]> {
-    const orchestration = await this.orchestration.run(context.request, {
+  ): AsyncIterable<ChatCompletionChunk> {
+    const stream = this.orchestration.streamFinal(context.request, {
       requestId: context.requestId,
       routeId: context.routeId,
       streamFinalOnly: context.streamFinalOnly,
@@ -114,38 +121,35 @@ export class ChatCompletionsService {
     });
     const id = createCompletionId();
     const created = unixTimestamp();
+    let roleEmitted = false;
 
-    return [
-      {
+    for await (const chunk of stream) {
+      if (chunk.finishReason !== null) {
+        if (!roleEmitted) {
+          yield createStreamContentChunk(id, created, context.publicModel, "", {
+            includeRole: true,
+          });
+        }
+        yield createStreamFinishChunk(
+          id,
+          created,
+          context.publicModel,
+          chunk.finishReason,
+        );
+        return;
+      }
+
+      yield createStreamContentChunk(
         id,
-        object: "chat.completion.chunk",
         created,
-        model: context.publicModel,
-        choices: [
-          {
-            index: 0,
-            delta: {
-              role: "assistant",
-              content: orchestration.content,
-            },
-            finish_reason: null,
-          },
-        ],
-      },
-      {
-        id,
-        object: "chat.completion.chunk",
-        created,
-        model: context.publicModel,
-        choices: [
-          {
-            index: 0,
-            delta: {},
-            finish_reason: orchestration.finishReason,
-          },
-        ],
-      },
-    ];
+        context.publicModel,
+        chunk.content,
+        { includeRole: !roleEmitted },
+      );
+      roleEmitted = true;
+    }
+
+    yield createStreamFinishChunk(id, created, context.publicModel, "stop");
   }
 
   isStreamingRequest(body: unknown): boolean {
@@ -360,6 +364,52 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function unixTimestamp(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+function createStreamContentChunk(
+  id: string,
+  created: number,
+  model: string,
+  content: string,
+  options: { includeRole: boolean },
+): ChatCompletionChunk {
+  return {
+    id,
+    object: "chat.completion.chunk",
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: {
+          ...(options.includeRole ? { role: "assistant" as const } : {}),
+          content,
+        },
+        finish_reason: null,
+      },
+    ],
+  };
+}
+
+function createStreamFinishChunk(
+  id: string,
+  created: number,
+  model: string,
+  finishReason: LlmFinishReason,
+): ChatCompletionChunk {
+  return {
+    id,
+    object: "chat.completion.chunk",
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: {},
+        finish_reason: finishReason,
+      },
+    ],
+  };
 }
 
 function createCompletionId(): string {

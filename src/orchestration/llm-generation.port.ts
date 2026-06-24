@@ -69,4 +69,5 @@ export interface LlmGenerateResult {
 
 export interface LlmGenerationPort {
   generate(request: LlmGenerateRequest): Promise<LlmGenerateResult>;
+  stream?(request: LlmGenerateRequest): AsyncIterable<string>;
 }
