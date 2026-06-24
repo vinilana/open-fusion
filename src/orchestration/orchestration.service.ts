@@ -126,6 +126,7 @@ export class OrchestrationService {
         );
         if (result.status === "success") {
           delegations += 1;
+          addUsage(usage, result.usage);
         }
         toolResults.push(result);
       }
