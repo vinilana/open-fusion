@@ -83,7 +83,8 @@ Se ausente, o backend pode tentar `./config/open-fusion.config.json`.
       "maxDepth": 1,
       "timeoutMs": 60000,
       "delegateTimeoutMs": 30000,
-      "streamFinalOnly": true
+      "streamFinalOnly": true,
+      "allowClientTools": false
     }
   },
   "observability": {
@@ -101,6 +102,7 @@ Se ausente, o backend pode tentar `./config/open-fusion.config.json`.
 - Cada rota deve referenciar um orquestrador existente.
 - `allowedDelegateModels` deve conter apenas modelos existentes com role `delegate`.
 - `maxDepth` deve ser `1` no MVP.
+- `allowClientTools` deve ser booleano quando declarado; quando ausente, o default seguro e `false`.
 - Segredos resolvidos por `*Env` devem existir no ambiente, salvo em modo de validacao permissivo local.
 
 ## Resolucao de segredos

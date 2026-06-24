@@ -32,13 +32,18 @@ export interface DelegateToolResult {
 }
 
 export interface LlmGenerateRequest {
+  requestId?: string;
+  routeId?: string;
   modelId: string;
   publicModelId: string;
   role: LlmInvocationRole;
   messages: ChatCompletionMessage[];
   system?: string;
   delegateModels?: DelegateModelContext[];
+  internalTools?: ["delegate_llm"];
+  clientTools?: unknown[];
   toolResults?: DelegateToolResult[];
+  streamFinalOnly?: boolean;
   timeoutMs: number;
 }
 

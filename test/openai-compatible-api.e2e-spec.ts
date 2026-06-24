@@ -208,6 +208,35 @@ describe("OpenAI-compatible API", () => {
     });
   });
 
+  it("rejects external client tools unless the active route explicitly allows them", async () => {
+    const response = await request(app.getHttpServer())
+      .post("/v1/chat/completions")
+      .set("Authorization", "Bearer test-gateway-key")
+      .send({
+        model: "route/default",
+        messages: [{ role: "user", content: "hello" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "lookup_weather",
+              description: "external tool",
+            },
+          },
+        ],
+      })
+      .expect(400);
+
+    expect(response.body).toEqual({
+      error: {
+        message: "Client tools are not enabled for route 'default'.",
+        type: "invalid_request_error",
+        param: "tools",
+        code: "invalid_request",
+      },
+    });
+  });
+
   it("returns a Chat Completions envelope for non-streaming requests", async () => {
     const response = await request(app.getHttpServer())
       .post("/v1/chat/completions")

@@ -31,6 +31,7 @@ describe("GatewayConfigService", () => {
         id: "default",
         orchestrator: "orchestrator.default",
         allowedDelegateModels: ["worker.fast"],
+        allowClientTools: false,
       });
       expect(JSON.stringify(config.listPublicModels())).not.toContain(
         "sk-openrouter",
@@ -38,6 +39,20 @@ describe("GatewayConfigService", () => {
     } finally {
       cleanup();
     }
+  });
+
+  it("allows routes to opt in to client tools explicitly", () => {
+    const rawConfig = minimalConfig();
+    rawConfig.routes.default.allowClientTools = true;
+
+    const config = new GatewayConfigService({
+      rawConfig,
+      env: validEnv(),
+    });
+
+    expect(config.resolveRouteByPublicModel("route/default")).toMatchObject({
+      allowClientTools: true,
+    });
   });
 
   it("resolves required secrets from a dotenv file", () => {
@@ -142,6 +157,24 @@ describe("GatewayConfigService", () => {
             env: validEnv(),
           }),
         "routes.default.allowedDelegateModels[0]",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("rejects non-boolean client tool route policy", () => {
+    const config = minimalConfig();
+    config.routes.default.allowClientTools = "yes" as unknown as boolean;
+    const { path, cleanup } = writeConfig(config);
+    try {
+      expectConfigErrorAt(
+        () =>
+          new GatewayConfigService({
+            configPath: path,
+            env: validEnv(),
+          }),
+        "routes.default.allowClientTools",
       );
     } finally {
       cleanup();

@@ -24,6 +24,13 @@ export interface OrchestrationResult {
   usage: LlmUsage;
 }
 
+export interface OrchestrationRunContext {
+  requestId?: string;
+  routeId?: string;
+  streamFinalOnly?: boolean;
+  clientTools?: unknown[];
+}
+
 @Injectable()
 export class OrchestrationService {
   constructor(
@@ -32,7 +39,10 @@ export class OrchestrationService {
     private readonly generation: LlmGenerationPort,
   ) {}
 
-  async run(request: ChatCompletionRequest): Promise<OrchestrationResult> {
+  async run(
+    request: ChatCompletionRequest,
+    context: OrchestrationRunContext = {},
+  ): Promise<OrchestrationResult> {
     const route = this.config.resolveRouteByPublicModel(request.model);
     if (!route) {
       throw OpenAiHttpError.modelNotFound(request.model);
@@ -57,11 +67,16 @@ export class OrchestrationService {
         this.generation.generate({
           modelId: route.orchestrator,
           publicModelId: route.publicModel,
+          requestId: context.requestId,
+          routeId: context.routeId ?? route.id,
           role: "orchestrator",
           messages: request.messages,
           system: buildOrchestratorSystemPrompt(route, delegateModels),
           delegateModels,
+          internalTools: ["delegate_llm"],
+          clientTools: context.clientTools,
           toolResults: toolResults.length > 0 ? [...toolResults] : undefined,
+          streamFinalOnly: context.streamFinalOnly ?? route.streamFinalOnly,
           timeoutMs: orchestratorTimeoutMs,
         }),
         orchestratorTimeoutMs,

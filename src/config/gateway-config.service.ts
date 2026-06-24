@@ -46,6 +46,7 @@ export interface RawGatewayConfig {
       timeoutMs: number;
       delegateTimeoutMs: number;
       streamFinalOnly: boolean;
+      allowClientTools?: boolean;
     }
   >;
   observability?: {
@@ -95,6 +96,7 @@ export interface RouteConfig {
   timeoutMs: number;
   delegateTimeoutMs: number;
   streamFinalOnly: boolean;
+  allowClientTools: boolean;
 }
 
 export interface ModelAccessPolicy {
@@ -523,6 +525,15 @@ function validateRoutes(
         "must be a boolean",
       );
     }
+    if (
+      route.allowClientTools !== undefined &&
+      typeof route.allowClientTools !== "boolean"
+    ) {
+      throw new GatewayConfigError(
+        `routes.${id}.allowClientTools`,
+        "must be a boolean",
+      );
+    }
 
     return {
       id,
@@ -534,6 +545,7 @@ function validateRoutes(
       timeoutMs: route.timeoutMs,
       delegateTimeoutMs: route.delegateTimeoutMs,
       streamFinalOnly: route.streamFinalOnly,
+      allowClientTools: route.allowClientTools === true,
     };
   });
 }

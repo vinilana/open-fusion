@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 
 import { Injectable } from "@nestjs/common";
 
-import { GatewayConfigService } from "../config/gateway-config.service";
+import {
+  GatewayConfigService,
+  RouteConfig,
+} from "../config/gateway-config.service";
 import { OpenAiHttpError } from "../errors/openai-http-error";
 import { OrchestrationService } from "../orchestration/orchestration.service";
 import {
@@ -20,6 +23,8 @@ export interface ChatCompletionRequestContext {
   requestId: string;
   routeId: string;
   publicModel: string;
+  orchestrator: string;
+  streamFinalOnly: boolean;
   stream: boolean;
   request: ChatCompletionRequest;
 }
@@ -38,11 +43,14 @@ export class ChatCompletionsService {
   ): ChatCompletionRequestContext {
     const request = this.validate(body);
     const route = this.assertModelAccess(request.model, client);
+    this.assertClientToolsAllowed(request, route);
 
     return {
       requestId,
       routeId: route.id,
       publicModel: request.model,
+      orchestrator: route.orchestrator,
+      streamFinalOnly: route.streamFinalOnly,
       stream: request.stream === true,
       request,
     };
@@ -58,7 +66,12 @@ export class ChatCompletionsService {
   async completeRequest(
     context: ChatCompletionRequestContext,
   ): Promise<ChatCompletionResponse> {
-    const orchestration = await this.orchestration.run(context.request);
+    const orchestration = await this.orchestration.run(context.request, {
+      requestId: context.requestId,
+      routeId: context.routeId,
+      streamFinalOnly: context.streamFinalOnly,
+      clientTools: context.request.tools,
+    });
     const created = unixTimestamp();
     return {
       id: createCompletionId(),
@@ -93,7 +106,12 @@ export class ChatCompletionsService {
   async streamRequest(
     context: ChatCompletionRequestContext,
   ): Promise<ChatCompletionChunk[]> {
-    const orchestration = await this.orchestration.run(context.request);
+    const orchestration = await this.orchestration.run(context.request, {
+      requestId: context.requestId,
+      routeId: context.routeId,
+      streamFinalOnly: context.streamFinalOnly,
+      clientTools: context.request.tools,
+    });
     const id = createCompletionId();
     const created = unixTimestamp();
 
@@ -301,7 +319,7 @@ export class ChatCompletionsService {
   private assertModelAccess(
     modelId: string,
     client: AuthenticatedClient,
-  ): { id: string } {
+  ): RouteConfig {
     const model = this.config.findPublicModel(modelId);
     if (!model) {
       throw OpenAiHttpError.modelNotFound(modelId);
@@ -317,6 +335,22 @@ export class ChatCompletionsService {
     }
 
     return route;
+  }
+
+  private assertClientToolsAllowed(
+    request: ChatCompletionRequest,
+    route: RouteConfig,
+  ): void {
+    if (
+      request.tools !== undefined &&
+      request.tools.length > 0 &&
+      !route.allowClientTools
+    ) {
+      throw OpenAiHttpError.invalidRequest(
+        `Client tools are not enabled for route '${route.id}'.`,
+        "tools",
+      );
+    }
   }
 }
 

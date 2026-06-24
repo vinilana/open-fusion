@@ -9,6 +9,8 @@ import { OrchestrationService } from "../src/orchestration/orchestration.service
 import { ChatCompletionRequest } from "../src/v1/openai-types";
 import { minimalConfig, validEnv } from "./support/gateway-config.fixture";
 
+const routeModel = "route/default";
+
 class ScriptedGenerationPort implements LlmGenerationPort {
   readonly requests: LlmGenerateRequest[] = [];
   private readonly results: Array<
@@ -30,8 +32,6 @@ class ScriptedGenerationPort implements LlmGenerationPort {
 }
 
 describe("LLM orchestration routing", () => {
-  const routeModel = "route/default";
-
   it("calls the configured orchestrator for a direct response", async () => {
     const generation = new ScriptedGenerationPort([
       {
@@ -41,16 +41,24 @@ describe("LLM orchestration routing", () => {
     ]);
     const service = new OrchestrationService(createConfigService(), generation);
 
-    const response = await service.run(createRequest(routeModel, "hello"));
+    const response = await service.run(
+      createRequest(routeModel, "hello"),
+      createRuntimeContext(),
+    );
 
     expect(response.content).toBe("direct answer");
     expect(response.finishReason).toBe("stop");
     expect(generation.requests).toHaveLength(1);
     expect(generation.requests[0]).toMatchObject({
+      requestId: "req-orchestration-test",
+      routeId: "default",
       modelId: "orchestrator.default",
       role: "orchestrator",
+      streamFinalOnly: true,
       timeoutMs: 60000,
     });
+    expect(generation.requests[0].internalTools).toEqual(["delegate_llm"]);
+    expect(generation.requests[0].clientTools).toBeUndefined();
     expect(generation.requests[0].delegateModels).toEqual([
       {
         id: "worker.fast",
@@ -259,6 +267,15 @@ function createRequest(model: string, content: string): ChatCompletionRequest {
   return {
     model,
     messages: [{ role: "user", content }],
+  };
+}
+
+function createRuntimeContext() {
+  return {
+    requestId: "req-orchestration-test",
+    routeId: "default",
+    publicModel: routeModel,
+    stream: false,
   };
 }
 
