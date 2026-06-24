@@ -314,4 +314,31 @@ describe("OpenAI-compatible API", () => {
     expect(response.text).toContain('"delta":{"role":"assistant"');
     expect(response.text.trim().endsWith("data: [DONE]")).toBe(true);
   });
+
+  it("logs structured completion metadata without full prompts or responses", async () => {
+    const logSpy = jest
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await request(app.getHttpServer())
+      .post("/v1/chat/completions")
+      .set("Authorization", "Bearer test-gateway-key")
+      .set("x-request-id", "req-log-001")
+      .send({
+        model: "route/default",
+        messages: [{ role: "user", content: "full prompt must not be logged" }],
+      })
+      .expect(200);
+
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('"event":"chat_completion.completed"'),
+    );
+    const serializedLogs = logSpy.mock.calls.flat().join("\n");
+    expect(serializedLogs).toContain('"requestId":"req-log-001"');
+    expect(serializedLogs).toContain('"publicModel":"route/default"');
+    expect(serializedLogs).not.toContain("full prompt must not be logged");
+    expect(serializedLogs).not.toContain("Open Fusion received");
+
+    logSpy.mockRestore();
+  });
 });

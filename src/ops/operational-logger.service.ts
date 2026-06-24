@@ -1,0 +1,51 @@
+import { Injectable } from "@nestjs/common";
+
+import { OpenAiHttpError } from "../errors/openai-http-error";
+
+export interface ChatCompletionLogEvent {
+  event: "chat_completion.completed" | "chat_completion.failed";
+  requestId: string;
+  clientId: string;
+  routeId: string;
+  publicModel: string;
+  orchestrator: string;
+  stream: boolean;
+  status: "success" | "error";
+  latencyMs: number;
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+  error?: {
+    type: string;
+    code: string;
+    param: string | null;
+    status: number;
+  };
+}
+
+@Injectable()
+export class OperationalLoggerService {
+  logChatCompletion(event: ChatCompletionLogEvent): void {
+    console.log(JSON.stringify(event));
+  }
+
+  normalizeError(error: unknown): ChatCompletionLogEvent["error"] {
+    if (error instanceof OpenAiHttpError) {
+      return {
+        type: error.type,
+        code: error.code,
+        param: error.param,
+        status: error.status,
+      };
+    }
+
+    return {
+      type: "server_error",
+      code: "internal_error",
+      param: null,
+      status: 500,
+    };
+  }
+}
