@@ -32,6 +32,9 @@ export interface DelegateToolResult {
   task: string;
   status: "success" | "error";
   content: string;
+  finishReason?: LlmFinishReason;
+  usage?: LlmUsage;
+  latencyMs: number;
   untrusted: true;
 }
 

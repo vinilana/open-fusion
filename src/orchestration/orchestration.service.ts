@@ -9,6 +9,7 @@ import {
   RouteConfig,
 } from "../config/gateway-config.service";
 import { OpenAiHttpError } from "../errors/openai-http-error";
+import { redactSensitive } from "../errors/redact-sensitive";
 import {
   DelegateLlmToolCall,
   DelegateModelContext,
@@ -104,6 +105,7 @@ export class OrchestrationService {
             task: "unknown",
             status: "error",
             content: `Unsupported internal tool '${toolCall.name}'.`,
+            latencyMs: 0,
             untrusted: true,
           });
           continue;
@@ -138,6 +140,7 @@ export class OrchestrationService {
   ): Promise<DelegateToolResult> {
     const targetModel = toolCall.arguments.target_model;
     const task = toolCall.arguments.task;
+    const startedAt = Date.now();
 
     if (!route.allowedDelegateModels.includes(targetModel)) {
       return {
@@ -146,6 +149,7 @@ export class OrchestrationService {
         task,
         status: "error",
         content: `Delegation target '${targetModel}' is not allowed for route '${route.id}'.`,
+        latencyMs: elapsedMs(startedAt),
         untrusted: true,
       };
     }
@@ -161,9 +165,11 @@ export class OrchestrationService {
         this.generation.generate({
           modelId: targetModel,
           publicModelId: request.model,
+          routeId: route.id,
           role: "delegate",
           messages: buildDelegateMessages(toolCall),
           system: toolCall.arguments.output_contract,
+          streamFinalOnly: route.streamFinalOnly,
           timeoutMs: delegateTimeoutMs,
         }),
         delegateTimeoutMs,
@@ -177,6 +183,7 @@ export class OrchestrationService {
           task,
           status: "error",
           content: error.message,
+          latencyMs: elapsedMs(startedAt),
           untrusted: true,
         };
       }
@@ -189,7 +196,10 @@ export class OrchestrationService {
       targetModel,
       task,
       status: "success",
-      content: delegateResult.content,
+      content: redactSensitive(delegateResult.content),
+      finishReason: delegateResult.finishReason,
+      usage: delegateResult.usage,
+      latencyMs: elapsedMs(startedAt),
       untrusted: true,
     };
   }
@@ -241,6 +251,10 @@ function addUsage(total: LlmUsage, usage?: LlmUsage): void {
   total.promptTokens += usage.promptTokens;
   total.completionTokens += usage.completionTokens;
   total.totalTokens += usage.totalTokens;
+}
+
+function elapsedMs(startedAt: number): number {
+  return Math.max(0, Date.now() - startedAt);
 }
 
 function remainingMs(deadline: number, route: RouteConfig): number {

@@ -110,11 +110,115 @@ describe("LLM orchestration routing", () => {
     expect(generation.requests[2].toolResults).toEqual([
       expect.objectContaining({
         targetModel: "worker.fast",
+        task: "draft a short answer",
         status: "success",
         content: "delegate draft",
+        finishReason: "stop",
+        latencyMs: expect.any(Number),
         untrusted: true,
       }),
     ]);
+  });
+
+  it("redacts sensitive delegate content before reinserting it into orchestrator context", async () => {
+    const generation = new ScriptedGenerationPort([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "call_1",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.fast",
+              task: "fetch sensitive detail",
+            },
+          },
+        ],
+      },
+      {
+        content: "provider key sk-secret-value should not be reinjected",
+        finishReason: "stop",
+      },
+      {
+        content: "safe final answer",
+        finishReason: "stop",
+      },
+    ]);
+    const service = new OrchestrationService(createConfigService(), generation);
+
+    await service.run(createRequest(routeModel, "hello"));
+
+    expect(generation.requests[2].toolResults).toEqual([
+      expect.objectContaining({
+        status: "success",
+        content: "provider key sk-[REDACTED] should not be reinjected",
+        untrusted: true,
+      }),
+    ]);
+  });
+
+  it("aggregates token usage from orchestrator, delegation, and final synthesis", async () => {
+    const generation = new ScriptedGenerationPort([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "call_1",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.fast",
+              task: "draft",
+            },
+          },
+        ],
+        usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 },
+      },
+      {
+        content: "delegate draft",
+        finishReason: "length",
+        usage: { promptTokens: 4, completionTokens: 5, totalTokens: 9 },
+      },
+      {
+        content: "final synthesis",
+        finishReason: "stop",
+        usage: { promptTokens: 6, completionTokens: 7, totalTokens: 13 },
+      },
+    ]);
+    const service = new OrchestrationService(createConfigService(), generation);
+
+    const response = await service.run(createRequest(routeModel, "hello"));
+
+    expect(response.usage).toEqual({
+      promptTokens: 11,
+      completionTokens: 14,
+      totalTokens: 25,
+    });
+    expect(generation.requests[2].toolResults).toEqual([
+      expect.objectContaining({
+        finishReason: "length",
+        usage: { promptTokens: 4, completionTokens: 5, totalTokens: 9 },
+      }),
+    ]);
+  });
+
+  it("maps final finish reasons without exposing internal tool results", async () => {
+    const generation = new ScriptedGenerationPort([
+      {
+        content: "truncated answer",
+        finishReason: "length",
+      },
+    ]);
+    const service = new OrchestrationService(createConfigService(), generation);
+
+    const response = await service.run(createRequest(routeModel, "hello"));
+
+    expect(response).toMatchObject({
+      content: "truncated answer",
+      finishReason: "length",
+    });
+    expect(response).not.toHaveProperty("toolResults");
   });
 
   it("blocks delegate calls to models that are not allowed by the active route", async () => {
