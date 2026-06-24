@@ -193,6 +193,11 @@ function toModelMessages(
         `Model: ${result.targetModel}`,
         `Task: ${result.task}`,
         `Status: ${result.status}`,
+        `LatencyMs: ${result.latencyMs}`,
+        `FinishReason: ${result.finishReason ?? "unknown"}`,
+        result.usage
+          ? `Usage: prompt=${result.usage.promptTokens}, completion=${result.usage.completionTokens}, total=${result.usage.totalTokens}`
+          : "Usage: unavailable",
         `Content: ${result.content}`,
       ].join("\n"),
     });
@@ -230,6 +235,9 @@ function normalizeFinishReason(reason: string): LlmFinishReason {
   }
   if (reason === "tool-calls" || reason === "tool_calls") {
     return "tool_calls";
+  }
+  if (reason === "content-filter" || reason === "content_filter") {
+    return "content_filter";
   }
 
   return "stop";
