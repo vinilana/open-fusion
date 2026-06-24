@@ -3,7 +3,11 @@ import { ChatCompletionMessage } from "../v1/openai-types";
 export const LLM_GENERATION_PORT = "LLM_GENERATION_PORT";
 
 export type LlmInvocationRole = "orchestrator" | "delegate";
-export type LlmFinishReason = "stop" | "length" | "tool_calls";
+export type LlmFinishReason =
+  | "stop"
+  | "length"
+  | "tool_calls"
+  | "content_filter";
 
 export interface DelegateModelContext {
   id: string;

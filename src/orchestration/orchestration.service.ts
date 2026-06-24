@@ -14,13 +14,14 @@ import {
   DelegateModelContext,
   DelegateToolResult,
   LLM_GENERATION_PORT,
+  LlmFinishReason,
   LlmGenerationPort,
   LlmUsage,
 } from "./llm-generation.port";
 
 export interface OrchestrationResult {
   content: string;
-  finishReason: "stop";
+  finishReason: LlmFinishReason;
   usage: LlmUsage;
 }
 
@@ -90,7 +91,7 @@ export class OrchestrationService {
       ) {
         return {
           content: orchestratorResult.content,
-          finishReason: "stop",
+          finishReason: orchestratorResult.finishReason,
           usage,
         };
       }
