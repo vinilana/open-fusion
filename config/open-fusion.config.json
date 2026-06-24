@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "server": {
+    "port": 3000,
+    "publicBaseUrl": "http://localhost:3000"
+  },
+  "auth": {
+    "apiKeys": [
+      {
+        "id": "local-dev",
+        "tokenEnv": "OPEN_FUSION_DEV_API_KEY",
+        "allowedRoutes": [
+          "default"
+        ]
+      }
+    ]
+  },
+  "providers": {
+    "openrouter": {
+      "type": "openrouter",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "headers": {
+        "HTTP-Referer": "https://example.com",
+        "X-Title": "Open Fusion"
+      }
+    }
+  },
+  "models": {
+    "orchestrator.default": {
+      "provider": "openrouter",
+      "model": "google/gemini-3.5-flash",
+      "role": "orchestrator",
+      "capabilities": [
+        "general"
+      ],
+      "defaults": {
+        "temperature": 0.2
+      }
+    },
+    "worker.fast": {
+      "provider": "openrouter",
+      "model": "moonshotai/kimi-k2.7-code",
+      "role": "delegate",
+      "capabilities": [
+        "coding"
+      ],
+      "defaults": {
+        "temperature": 0.3
+      }
+    }
+  },
+  "routes": {
+    "default": {
+      "publicModel": "route/default",
+      "orchestrator": "orchestrator.default",
+      "allowedDelegateModels": [
+        "worker.fast"
+      ],
+      "maxDelegations": 3,
+      "maxDepth": 1,
+      "timeoutMs": 60000,
+      "delegateTimeoutMs": 30000,
+      "streamFinalOnly": true
+    }
+  },
+  "observability": {
+    "logLevel": "info",
+    "redact": [
+      "apiKey",
+      "token",
+      "authorization"
+    ]
+  }
+}
