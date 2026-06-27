@@ -13,6 +13,7 @@ description: Maintain Open Fusion product and architecture documentation. Use wh
 4. Prefer changing an existing spec or ADR when it already owns the topic.
 5. Create a new spec for new behavior, contracts, workflows, or operational requirements.
 6. Create a new ADR for durable decisions with meaningful tradeoffs.
+7. When implementation lands, update stale status labels and PRD roadmap notes that still say the spec is draft, next, or upcoming.
 
 ## Document Boundaries
 
@@ -57,3 +58,4 @@ When adding an ADR:
 - Keep language direct and implementation-ready.
 - Avoid duplicating full schemas across many files; link to the owning spec.
 - If a proposed change contradicts an accepted ADR, either update the ADR status or create a superseding ADR.
+- Do not leave implemented specs marked as future work; status drift is a documentation bug even when requirements are unchanged.

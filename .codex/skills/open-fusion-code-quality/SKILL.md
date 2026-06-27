@@ -48,10 +48,13 @@ Crossing these boundaries should happen through typed interfaces.
 ## TypeScript Standards
 
 - Prefer explicit domain types over loose `any`.
+- Do not leave untyped locals that widen to `any` for provider, orchestration, or config results.
 - Model config and API DTOs separately.
 - Validate external input at boundaries before using typed runtime objects.
+- Treat provider outputs as external input even when they came through an SDK type.
 - Use discriminated unions for provider result/error variants when useful.
 - Keep async cancellation/timeout behavior visible in function signatures or options.
+- Extract shared domain types when the same request/client/config shape appears across services and Express request augmentation.
 
 ## NestJS Standards
 
@@ -69,6 +72,9 @@ Crossing these boundaries should happen through typed interfaces.
 - raw secrets in logs or thrown errors;
 - orchestration loops without hard backend limits;
 - tests that only verify mocks were called;
+- duplicated `AuthenticatedClient`-style shapes across services and request typings;
+- provider payload casts without runtime validation;
+- public or operational errors with misleading status/code semantics;
 - abstractions named `Manager`, `Helper`, or `Util` without a clear domain role.
 
 ## Refactoring Rule

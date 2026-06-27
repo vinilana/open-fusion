@@ -38,6 +38,27 @@ Each adapter should own:
 - normalizing provider errors;
 - returning usage metadata when available.
 
+## Boundary Validation
+
+Treat every provider result as untrusted until normalized:
+
+- Validate tool call names, ids, arguments, and optional fields before constructing internal `DelegateLlmToolCall` values.
+- Do not cast provider-supplied `messages` directly to `ChatCompletionMessage[]`; validate each entry's object shape, role, content, and tool fields.
+- Normalize empty dependency arrays intentionally. Preserve `depends_on: []` only if orchestration semantics require it; otherwise omit it so an empty array cannot change task classification.
+- Drop or reject malformed provider tool payloads deterministically; do not let malformed provider data crash orchestration.
+- Keep provider-originated content untrusted even after validation.
+
+## Error Semantics
+
+- Use `provider_error`/502 for upstream provider failures.
+- Use `internal_error`/500 for gateway configuration or wiring faults, such as an internal model id that cannot be resolved before calling a provider.
+- Redact provider error details before public errors or logs can expose credentials.
+
+## Cancellation And Timeouts
+
+- Keep timeout behavior explicit in adapter requests.
+- When orchestration requires aborting parallel work, thread `AbortSignal` or an equivalent cancellation contract through the internal port and adapter instead of only ignoring late results.
+
 ## OpenRouter Rules
 
 - OpenRouter is the first official provider.
@@ -60,4 +81,4 @@ Do not change public API controllers just to add a provider.
 
 ## Testing
 
-Use mocks or test doubles for provider calls by default. Add integration tests only when credentials and cost controls are explicit. Cover success, stream, tool-capable calls, unsupported capability, timeout, and error normalization.
+Use mocks or test doubles for provider calls by default. Add integration tests only when credentials and cost controls are explicit. Cover success, stream, tool-capable calls, malformed tool payloads, malformed delegate messages, unsupported capability, timeout, cancellation when supported, unknown internal model ids, and error normalization.

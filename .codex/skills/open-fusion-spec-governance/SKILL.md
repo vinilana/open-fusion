@@ -22,6 +22,7 @@ Existing implemented specs may be edited only for:
 
 - typo or formatting fixes that do not change requirements;
 - broken link fixes;
+- status or roadmap corrections after the implementation lands, when they only reflect reality and add no new requirement;
 - explicit user-approved corrections to historical text.
 
 Do not use an implemented spec as a convenient place to document a new field, flag, route, policy, behavior, or acceptance criterion.
@@ -41,5 +42,6 @@ Before editing docs:
 - Did this change add a requirement to an old implemented spec?
 - Should this be in the current active spec instead?
 - Should this be a new spec or ADR?
+- If a spec moved from planned to implemented, did its Status and the `docs/PRD.md` reference stop saying it is next/upcoming?
 - Is `docs/PRD.md` updated when a new spec or ADR was added?
 - Are tests covering the newly documented requirement?

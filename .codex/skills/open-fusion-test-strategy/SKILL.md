@@ -14,7 +14,7 @@ Read the owning spec before designing tests:
 - Config: `docs/specs/003-single-json-configuration.md`
 - Providers: `docs/specs/004-provider-adapters-openrouter.md`
 - Streaming/tools: `docs/specs/005-streaming-tools-response-normalization.md`
-- Ops/security: `docs/specs/006-observability-resilience-security.md`
+- Ops/security: `docs/specs/007-observability-resilience-security.md`
 
 ## Test Pyramid
 
@@ -44,6 +44,8 @@ API:
 
 - valid chat completion request;
 - invalid request envelope;
+- non-finite numeric fields (`NaN`, `Infinity`, `-Infinity`);
+- message count, message content, and payload limit failures;
 - unknown public model;
 - auth failure;
 - OpenAI-style error body;
@@ -64,7 +66,11 @@ Orchestration:
 - allowed delegation;
 - blocked delegation;
 - max delegation limit;
+- blocked, failed, and timed out attempts counted against `maxDelegations`;
 - delegate timeout;
+- finish reason propagation;
+- `depends_on: []` does not become a pre-final task by itself;
+- parallel pre-final task failure cancels in-flight work or explicitly ignores late results;
 - final-only streaming.
 
 Providers:
@@ -72,7 +78,10 @@ Providers:
 - non-streaming success;
 - streaming success;
 - tool-capable path;
+- malformed provider tool payloads;
+- malformed provider-supplied delegate messages;
 - unsupported capability;
+- unknown internal model id maps to internal error;
 - provider timeout;
 - provider error normalization.
 
@@ -80,9 +89,15 @@ Ops:
 
 - request id propagation;
 - structured log fields;
+- `chat_completion.failed` for validation/model/tools policy errors before SSE;
 - redaction;
 - payload limits;
 - health checks without paid provider calls.
+
+Test hygiene:
+
+- Restore `process.env` by mutating the existing object, not by assigning a new object to `process.env`.
+- Assert behavior and public contracts first; use mock call assertions only to clarify boundary interactions.
 
 ## Test Quality
 

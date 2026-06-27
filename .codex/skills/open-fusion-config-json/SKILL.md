@@ -17,7 +17,7 @@ Read provider and orchestration specs when config fields affect those areas:
 
 - `docs/specs/002-llm-orchestration-routing.md`
 - `docs/specs/004-provider-adapters-openrouter.md`
-- `docs/specs/006-observability-resilience-security.md`
+- `docs/specs/007-observability-resilience-security.md`
 
 ## Configuration Contract
 
@@ -36,6 +36,7 @@ Validate at least:
 - delegate model references to existing models with delegate role;
 - `maxDepth` equal to `1` for MVP;
 - positive timeout and delegation limits;
+- payload, message-count, and message-content limits when those limits are configured;
 - auth key entries with resolvable secret references.
 
 Prefer a typed schema validator that produces field paths in errors.

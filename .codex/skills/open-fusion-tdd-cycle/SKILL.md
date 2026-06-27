@@ -36,6 +36,7 @@ If a failing test cannot be demonstrated because the project is not scaffolded y
 - Prefer one behavior assertion over broad snapshot tests.
 - Prefer deterministic fakes over live LLM/provider calls.
 - Capture regressions with a test before fixing bugs.
+- For review-comment fixes, reproduce the exact reviewed failure mode in a focused test before changing production code.
 - Keep test names behavioral: describe what the system should do, not how it does it.
 - When refactoring only, keep behavior tests unchanged unless they expose implementation details.
 
@@ -49,6 +50,10 @@ Prioritize tests around:
 - route and model authorization;
 - orchestration limits and blocked delegate models;
 - provider error normalization;
+- provider payload validation;
+- finite numeric validation and payload/message limits;
+- finish reason propagation;
+- cancellation or ignored-late-result behavior for parallel delegation;
 - request id, redaction, timeout, and auth behavior.
 
 ## Refactor Phase
