@@ -236,6 +236,24 @@ function toInternalToolsOption(
               type: "string",
               description: "Short reason for requesting this delegation.",
             },
+            task_id: {
+              type: "string",
+              description:
+                "Stable id for a pre-final internal agent task in the execution graph.",
+            },
+            depends_on: {
+              type: "array",
+              description:
+                "Ids of pre-final agent tasks that must finish before this task.",
+              items: {
+                type: "string",
+              },
+            },
+            final: {
+              type: "boolean",
+              description:
+                "Whether this delegate call is intended as the single final streaming target.",
+            },
           },
         }),
       }),
@@ -387,6 +405,20 @@ function toDelegateToolCalls(
           reason:
             typeof toolCall.input.reason === "string"
               ? toolCall.input.reason
+              : undefined,
+          task_id:
+            typeof toolCall.input.task_id === "string"
+              ? toolCall.input.task_id
+              : undefined,
+          depends_on: Array.isArray(toolCall.input.depends_on)
+            ? toolCall.input.depends_on.filter(
+                (dependency): dependency is string =>
+                  typeof dependency === "string",
+              )
+            : undefined,
+          final:
+            typeof toolCall.input.final === "boolean"
+              ? toolCall.input.final
               : undefined,
         },
       },

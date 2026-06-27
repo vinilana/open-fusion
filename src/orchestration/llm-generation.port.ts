@@ -23,6 +23,9 @@ export interface DelegateLlmToolCall {
     messages?: ChatCompletionMessage[];
     output_contract?: string;
     reason?: string;
+    task_id?: string;
+    depends_on?: string[];
+    final?: boolean;
   };
 }
 
