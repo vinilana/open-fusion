@@ -913,6 +913,48 @@ describe("LLM orchestration routing", () => {
     ]);
   });
 
+  it("corrects a streaming final target to the first matching delegate in route order", async () => {
+    const generation = new ScriptedGenerationPort(
+      [
+        {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [
+            {
+              id: "call_secondary",
+              name: "delegate_llm",
+              arguments: {
+                target_model: "worker.code.secondary",
+                task: "answer with secondary code model",
+              },
+            },
+          ],
+        },
+      ],
+      [["primary code delegate answer"]],
+    );
+    const service = new OrchestrationService(
+      createDuplicateCodeCapabilityConfigService(),
+      generation,
+    );
+
+    const chunks = [];
+    for await (const chunk of service.streamFinal(
+      createRequest(routeModel, "write typescript code for a queue"),
+      createRuntimeContext(),
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { content: "primary code delegate answer", finishReason: null },
+      { content: "", finishReason: "stop" },
+    ]);
+    expect(generation.streamRequests.map((request) => request.modelId)).toEqual(
+      ["worker.code.primary"],
+    );
+  });
+
   it("uses orchestrator fallback for specialized streaming requests when no exact delegate exists", async () => {
     const generation = new ScriptedGenerationPort(
       [
@@ -1483,6 +1525,41 @@ function createCanonicalCapabilityConfigService(): GatewayConfigService {
     "worker.review",
     "worker.design",
     "worker.plan",
+    "worker.general",
+  ];
+
+  return new GatewayConfigService({
+    rawConfig: config,
+    env: validEnv(),
+  });
+}
+
+function createDuplicateCodeCapabilityConfigService(): GatewayConfigService {
+  const config = minimalConfig();
+  config.models = {
+    ...config.models,
+    "worker.code.primary": {
+      provider: "openrouter",
+      model: "openai/gpt-4.1-mini",
+      role: "delegate",
+      capabilities: ["code"],
+    },
+    "worker.code.secondary": {
+      provider: "openrouter",
+      model: "openai/gpt-4.1-mini",
+      role: "delegate",
+      capabilities: ["code"],
+    },
+    "worker.general": {
+      provider: "openrouter",
+      model: "openai/gpt-4.1-mini",
+      role: "delegate",
+      capabilities: ["general"],
+    },
+  };
+  config.routes.default.allowedDelegateModels = [
+    "worker.code.primary",
+    "worker.code.secondary",
     "worker.general",
   ];
 

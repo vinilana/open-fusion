@@ -1008,6 +1008,7 @@ function enforceStreamingFinalTarget(
   }
 
   const proposedTarget = proposedToolCall.arguments.target_model;
+  const resolvedTarget = resolvedFinalTarget.toolCall.arguments.target_model;
   const proposedModel = delegateModels.find(
     (model) => model.id === proposedTarget,
   );
@@ -1016,7 +1017,7 @@ function enforceStreamingFinalTarget(
       resolvedFinalTarget.classification.capability,
     ) === true;
 
-  if (hasRequiredCapability) {
+  if (proposedTarget === resolvedTarget && hasRequiredCapability) {
     return {
       ...resolvedFinalTarget,
       toolCall: proposedToolCall,
