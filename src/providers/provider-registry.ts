@@ -8,6 +8,7 @@ import { OpenAiHttpError } from "../errors/openai-http-error";
 import {
   LlmGenerateRequest,
   LlmGenerateResult,
+  LlmStreamChunk,
 } from "../orchestration/llm-generation.port";
 import { OpenRouterAdapter } from "./openrouter.adapter";
 
@@ -41,7 +42,7 @@ export class ProviderRegistry {
   stream(
     model: InternalModelConfig,
     request: LlmGenerateRequest,
-  ): AsyncIterable<string> {
+  ): AsyncIterable<LlmStreamChunk> {
     const provider = this.config.getProvider(model.provider);
     if (!provider) {
       throw OpenAiHttpError.providerError(

@@ -67,7 +67,13 @@ export interface LlmGenerateResult {
   usage?: LlmUsage;
 }
 
+export interface LlmStreamChunk {
+  content: string;
+  finishReason: LlmFinishReason | null;
+  usage?: LlmUsage;
+}
+
 export interface LlmGenerationPort {
   generate(request: LlmGenerateRequest): Promise<LlmGenerateResult>;
-  stream?(request: LlmGenerateRequest): AsyncIterable<string>;
+  stream?(request: LlmGenerateRequest): AsyncIterable<LlmStreamChunk>;
 }

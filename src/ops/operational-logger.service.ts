@@ -25,9 +25,38 @@ export interface ChatCompletionLogEvent {
   };
 }
 
+export interface LlmInvocationLogEvent {
+  event: "llm_invocation.completed" | "llm_invocation.failed";
+  phase: "orchestrator_planning" | "delegation" | "final_synthesis";
+  requestId: string;
+  routeId: string;
+  publicModel: string;
+  internalModel: string;
+  provider?: string;
+  role: "orchestrator" | "delegate";
+  status: "success" | "error";
+  latencyMs: number;
+  finishReason?: string;
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+  error?: {
+    type: string;
+    code: string;
+    param: string | null;
+    status: number;
+  };
+}
+
 @Injectable()
 export class OperationalLoggerService {
   logChatCompletion(event: ChatCompletionLogEvent): void {
+    console.log(JSON.stringify(event));
+  }
+
+  logLlmInvocation(event: LlmInvocationLogEvent): void {
     console.log(JSON.stringify(event));
   }
 

@@ -3,7 +3,13 @@ import { Test } from "@nestjs/testing";
 import request from "supertest";
 
 import { AppModule } from "../src/app.module";
-import { LLM_GENERATION_PORT } from "../src/orchestration/llm-generation.port";
+import { OpenAiHttpError } from "../src/errors/openai-http-error";
+import {
+  LLM_GENERATION_PORT,
+  LlmGenerateResult,
+  LlmGenerationPort,
+  LlmStreamChunk,
+} from "../src/orchestration/llm-generation.port";
 import { StubLlmGenerationPort } from "../src/orchestration/stub-llm-generation.port";
 import { validEnv, writeConfig } from "./support/gateway-config.fixture";
 
@@ -318,6 +324,84 @@ describe("OpenAI-compatible API", () => {
     expect(response.text.trim().endsWith("data: [DONE]")).toBe(true);
   });
 
+  it("returns a JSON error before opening SSE when streaming orchestration fails before the first chunk", async () => {
+    const failingApp = await createAppWithGenerationPort(
+      FailingBeforeFirstChunkGenerationPort,
+    );
+
+    try {
+      const response = await request(failingApp.app.getHttpServer())
+        .post("/v1/chat/completions")
+        .set("Authorization", "Bearer test-gateway-key")
+        .send({
+          model: "route/default",
+          stream: true,
+          messages: [{ role: "user", content: "stream please" }],
+        })
+        .expect(502);
+
+      expect(response.headers["content-type"]).toContain("application/json");
+      expect(response.body).toEqual({
+        error: {
+          message: "Provider failed before streaming began.",
+          type: "provider_error",
+          param: null,
+          code: "provider_error",
+        },
+      });
+      expect(response.text).not.toContain("data:");
+    } finally {
+      await failingApp.close();
+    }
+  });
+
+  it("closes SSE without leaking sensitive details when streaming fails after the first chunk", async () => {
+    const failingApp = await createAppWithGenerationPort(
+      FailingAfterFirstChunkGenerationPort,
+    );
+    const logSpy = jest
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    try {
+      const response = await request(failingApp.app.getHttpServer())
+        .post("/v1/chat/completions")
+        .set("Authorization", "Bearer test-gateway-key")
+        .set("x-request-id", "req-stream-failure-after-sse")
+        .send({
+          model: "route/default",
+          stream: true,
+          messages: [{ role: "user", content: "stream please" }],
+        })
+        .expect(200);
+
+      expect(response.headers["content-type"]).toContain("text/event-stream");
+      expect(response.text).toContain("partial final");
+      expect(response.text.trim().endsWith("data: [DONE]")).toBe(true);
+      expect(response.text).not.toContain("sk-provider-secret");
+      expect(response.text).not.toContain("Provider failed after streaming");
+      expect(response.text).not.toContain("provider_error");
+
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining('"event":"chat_completion.failed"'),
+      );
+      const serializedLogs = logSpy.mock.calls.flat().join("\n");
+      expect(serializedLogs).toContain(
+        '"requestId":"req-stream-failure-after-sse"',
+      );
+      expect(serializedLogs).toContain('"stream":true');
+      expect(serializedLogs).toContain('"status":"error"');
+      expect(serializedLogs).toContain('"type":"provider_error"');
+      expect(serializedLogs).toContain('"code":"provider_error"');
+      expect(serializedLogs).toContain('"status":502');
+      expect(serializedLogs).not.toContain("sk-provider-secret");
+      expect(serializedLogs).not.toContain("Provider failed after streaming");
+    } finally {
+      logSpy.mockRestore();
+      await failingApp.close();
+    }
+  });
+
   it("logs structured completion metadata without full prompts or responses", async () => {
     const logSpy = jest
       .spyOn(console, "log")
@@ -345,6 +429,92 @@ describe("OpenAI-compatible API", () => {
     logSpy.mockRestore();
   });
 });
+
+async function createAppWithGenerationPort(
+  generationPort: new () => LlmGenerationPort,
+): Promise<{ app: INestApplication; close: () => Promise<void> }> {
+  const previousEnv = { ...process.env };
+  const config = writeConfig();
+  process.env.OPEN_FUSION_CONFIG = config.path;
+  Object.assign(process.env, validEnv());
+
+  const moduleRef = await Test.createTestingModule({
+    imports: [AppModule],
+  })
+    .overrideProvider(LLM_GENERATION_PORT)
+    .useClass(generationPort)
+    .compile();
+
+  const app = moduleRef.createNestApplication();
+  await app.init();
+
+  return {
+    app,
+    async close() {
+      await app.close();
+      config.cleanup();
+      process.env = previousEnv;
+    },
+  };
+}
+
+class FailingBeforeFirstChunkGenerationPort implements LlmGenerationPort {
+  async generate(): Promise<LlmGenerateResult> {
+    throw OpenAiHttpError.providerError(
+      "Provider failed before streaming began.",
+    );
+  }
+
+  async *stream(): AsyncIterable<LlmStreamChunk> {
+    throw OpenAiHttpError.providerError(
+      "Stream should not start before planning completes.",
+    );
+    yield {
+      content: "",
+      finishReason: "stop",
+    };
+  }
+}
+
+class FailingAfterFirstChunkGenerationPort implements LlmGenerationPort {
+  private generateCalls = 0;
+
+  async generate(): Promise<LlmGenerateResult> {
+    this.generateCalls += 1;
+
+    if (this.generateCalls === 1) {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "call_1",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.fast",
+              task: "draft before streaming",
+            },
+          },
+        ],
+      };
+    }
+
+    return {
+      content: "delegate draft",
+      finishReason: "stop",
+    };
+  }
+
+  async *stream(): AsyncIterable<LlmStreamChunk> {
+    yield {
+      content: "partial final",
+      finishReason: null,
+    };
+    throw OpenAiHttpError.providerError(
+      "Provider failed after streaming with sk-provider-secret.",
+    );
+  }
+}
 
 function accumulateStreamContent(streamBody: string): string {
   return streamBody

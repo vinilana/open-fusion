@@ -35,15 +35,21 @@ export class ChatCompletionsController {
 
     const startedAt = Date.now();
 
+    let sseStarted = false;
+
     try {
       if (context.stream) {
-        response.status(200);
-        response.setHeader("content-type", "text/event-stream; charset=utf-8");
-        response.setHeader("cache-control", "no-cache, no-transform");
-        response.setHeader("connection", "keep-alive");
-
         for await (const chunk of this.completions.streamRequest(context)) {
-          response.write(`data: ${JSON.stringify(chunk)}\n\n`);
+          const event = `data: ${JSON.stringify(chunk)}\n\n`;
+          if (!sseStarted) {
+            this.openSseResponse(response);
+          }
+          response.write(event);
+          sseStarted = true;
+        }
+
+        if (!sseStarted) {
+          this.openSseResponse(response);
         }
         this.logSuccess(context, client.id, startedAt);
         response.end("data: [DONE]\n\n");
@@ -55,8 +61,21 @@ export class ChatCompletionsController {
       response.status(200).json(completion);
     } catch (error) {
       this.logFailure(context, client.id, startedAt, error);
+      if (context.stream && (sseStarted || response.headersSent)) {
+        if (!response.writableEnded) {
+          response.end("data: [DONE]\n\n");
+        }
+        return;
+      }
       throw error;
     }
+  }
+
+  private openSseResponse(response: Response): void {
+    response.status(200);
+    response.setHeader("content-type", "text/event-stream; charset=utf-8");
+    response.setHeader("cache-control", "no-cache, no-transform");
+    response.setHeader("connection", "keep-alive");
   }
 
   private logSuccess(

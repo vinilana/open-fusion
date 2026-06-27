@@ -4,6 +4,7 @@ import {
   LlmGenerateRequest,
   LlmGenerateResult,
   LlmGenerationPort,
+  LlmStreamChunk,
 } from "../src/orchestration/llm-generation.port";
 import { OrchestrationService } from "../src/orchestration/orchestration.service";
 import { ChatCompletionRequest } from "../src/v1/openai-types";
@@ -13,12 +14,20 @@ const routeModel = "route/default";
 
 class ScriptedGenerationPort implements LlmGenerationPort {
   readonly requests: LlmGenerateRequest[] = [];
+  readonly streamRequests: LlmGenerateRequest[] = [];
   private readonly results: Array<
     LlmGenerateResult | Promise<LlmGenerateResult>
   >;
+  private readonly streamResults: ScriptedStreamResult[];
 
-  constructor(results: Array<LlmGenerateResult | Promise<LlmGenerateResult>>) {
+  constructor(
+    results: Array<LlmGenerateResult | Promise<LlmGenerateResult>>,
+    streamResults: Array<string[] | ScriptedStreamResult> = [],
+  ) {
     this.results = [...results];
+    this.streamResults = streamResults.map((result) =>
+      Array.isArray(result) ? { chunks: result } : result,
+    );
   }
 
   async generate(request: LlmGenerateRequest): Promise<LlmGenerateResult> {
@@ -28,6 +37,62 @@ class ScriptedGenerationPort implements LlmGenerationPort {
       throw new Error("Unexpected generation request.");
     }
     return next;
+  }
+
+  async *stream(request: LlmGenerateRequest): AsyncIterable<LlmStreamChunk> {
+    this.streamRequests.push(request);
+    const next = this.streamResults.shift();
+    if (!next) {
+      throw new Error("Unexpected streaming request.");
+    }
+
+    for (const chunk of next.chunks) {
+      yield {
+        content: chunk,
+        finishReason: null,
+      };
+    }
+    yield {
+      content: "",
+      finishReason: next.finishReason ?? "stop",
+      usage: next.usage,
+    };
+  }
+}
+
+interface ScriptedStreamResult {
+  chunks: string[];
+  finishReason?: LlmGenerateResult["finishReason"];
+  usage?: LlmGenerateResult["usage"];
+}
+
+class CapturingOperationalLogger {
+  readonly events: unknown[] = [];
+
+  logLlmInvocation(event: unknown): void {
+    this.events.push(event);
+  }
+
+  logChatCompletion(): void {
+    throw new Error("Chat completion logs are not expected in this unit test.");
+  }
+
+  normalizeError(error: unknown) {
+    if (error instanceof OpenAiHttpError) {
+      return {
+        type: error.type,
+        code: error.code,
+        param: error.param,
+        status: error.status,
+      };
+    }
+
+    return {
+      type: "server_error",
+      code: "internal_error",
+      param: null,
+      status: 500,
+    };
   }
 }
 
@@ -55,8 +120,10 @@ describe("LLM orchestration routing", () => {
       modelId: "orchestrator.default",
       role: "orchestrator",
       streamFinalOnly: true,
-      timeoutMs: 60000,
+      timeoutMs: expect.any(Number),
     });
+    expect(generation.requests[0].timeoutMs).toBeGreaterThan(0);
+    expect(generation.requests[0].timeoutMs).toBeLessThanOrEqual(60000);
     expect(generation.requests[0].internalTools).toEqual(["delegate_llm"]);
     expect(generation.requests[0].clientTools).toBeUndefined();
     expect(generation.requests[0].delegateModels).toEqual([
@@ -95,7 +162,10 @@ describe("LLM orchestration routing", () => {
     ]);
     const service = new OrchestrationService(createConfigService(), generation);
 
-    const response = await service.run(createRequest(routeModel, "hello"));
+    const response = await service.run(
+      createRequest(routeModel, "hello"),
+      createRuntimeContext(),
+    );
 
     expect(response.content).toBe("final synthesis");
     expect(generation.requests.map((request) => request.modelId)).toEqual([
@@ -104,6 +174,7 @@ describe("LLM orchestration routing", () => {
       "orchestrator.default",
     ]);
     expect(generation.requests[1]).toMatchObject({
+      requestId: "req-orchestration-test",
       role: "delegate",
       timeoutMs: 30000,
     });
@@ -258,6 +329,62 @@ describe("LLM orchestration routing", () => {
         untrusted: true,
       }),
     ]);
+    expect(generation.requests[1].internalTools).toBeUndefined();
+  });
+
+  it("counts blocked delegate attempts against maxDelegations", async () => {
+    const generation = new ScriptedGenerationPort([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "call_1",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.restricted",
+              task: "first hidden model attempt",
+            },
+          },
+          {
+            id: "call_2",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.restricted",
+              task: "second hidden model attempt",
+            },
+          },
+          {
+            id: "call_3",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.restricted",
+              task: "third hidden model attempt",
+            },
+          },
+          {
+            id: "call_4",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.restricted",
+              task: "one too many hidden attempts",
+            },
+          },
+        ],
+      },
+    ]);
+    const service = new OrchestrationService(createConfigService(), generation);
+
+    await expect(
+      service.run(createRequest(routeModel, "hello"), createRuntimeContext()),
+    ).rejects.toEqual(
+      expect.objectContaining({
+        status: 400,
+        code: "invalid_request",
+        param: "maxDelegations",
+      } satisfies Partial<OpenAiHttpError>),
+    );
+    expect(generation.requests).toHaveLength(1);
   });
 
   it("enforces maxDelegations deterministically", async () => {
@@ -362,6 +489,452 @@ describe("LLM orchestration routing", () => {
         status: "error",
         content: "Delegation to 'worker.fast' timed out.",
         untrusted: true,
+      }),
+    ]);
+    expect(generation.requests[2].internalTools).toBeUndefined();
+  });
+
+  it("returns delegate provider failures as untrusted tool errors to the orchestrator", async () => {
+    const generation = new ScriptedGenerationPort([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "call_1",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.fast",
+              task: "provider can fail",
+            },
+          },
+        ],
+      },
+      Promise.reject(
+        OpenAiHttpError.providerError(
+          "Provider failed for delegate with sk-provider-secret.",
+        ),
+      ),
+      {
+        content: "fallback final answer",
+        finishReason: "stop",
+      },
+    ]);
+    const service = new OrchestrationService(createConfigService(), generation);
+
+    const response = await service.run(createRequest(routeModel, "hello"));
+
+    expect(response.content).toBe("fallback final answer");
+    expect(generation.requests.map((request) => request.modelId)).toEqual([
+      "orchestrator.default",
+      "worker.fast",
+      "orchestrator.default",
+    ]);
+    expect(generation.requests[2].toolResults).toEqual([
+      expect.objectContaining({
+        targetModel: "worker.fast",
+        status: "error",
+        content: expect.stringContaining("sk-[REDACTED]"),
+        untrusted: true,
+      }),
+    ]);
+    expect(generation.requests[2].internalTools).toBeUndefined();
+  });
+
+  it("counts timed out delegate attempts against maxDelegations", async () => {
+    const generation = new ScriptedGenerationPort([
+      {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "call_1",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.fast",
+              task: "first slow task",
+            },
+          },
+          {
+            id: "call_2",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.fast",
+              task: "second slow task",
+            },
+          },
+          {
+            id: "call_3",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.fast",
+              task: "third slow task",
+            },
+          },
+          {
+            id: "call_4",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.fast",
+              task: "one too many slow tasks",
+            },
+          },
+        ],
+      },
+      new Promise<LlmGenerateResult>(() => undefined),
+      new Promise<LlmGenerateResult>(() => undefined),
+      new Promise<LlmGenerateResult>(() => undefined),
+    ]);
+    const config = new FastTimeoutConfigService();
+    const service = new OrchestrationService(config, generation);
+
+    await expect(
+      service.run(createRequest(routeModel, "hello"), createRuntimeContext()),
+    ).rejects.toEqual(
+      expect.objectContaining({
+        status: 400,
+        code: "invalid_request",
+        param: "maxDelegations",
+      } satisfies Partial<OpenAiHttpError>),
+    );
+    expect(generation.requests.map((request) => request.modelId)).toEqual([
+      "orchestrator.default",
+      "worker.fast",
+      "worker.fast",
+      "worker.fast",
+    ]);
+  });
+
+  it("runs delegation planning before streaming only the final synthesis", async () => {
+    const generation = new ScriptedGenerationPort(
+      [
+        {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [
+            {
+              id: "call_1",
+              name: "delegate_llm",
+              arguments: {
+                target_model: "worker.fast",
+                task: "draft a streamable answer",
+              },
+            },
+          ],
+        },
+        {
+          content: "delegate draft",
+          finishReason: "stop",
+          usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 },
+        },
+        {
+          content: "ready for final stream",
+          finishReason: "stop",
+        },
+      ],
+      [["final ", "streamed ", "answer"]],
+    );
+    const service = new OrchestrationService(createConfigService(), generation);
+
+    const chunks = [];
+    for await (const chunk of service.streamFinal(
+      createRequest(routeModel, "hello"),
+      {
+        ...createRuntimeContext(),
+        streamFinalOnly: true,
+      },
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { content: "final ", finishReason: null },
+      { content: "streamed ", finishReason: null },
+      { content: "answer", finishReason: null },
+      { content: "", finishReason: "stop" },
+    ]);
+    expect(generation.requests.map((request) => request.modelId)).toEqual([
+      "orchestrator.default",
+      "worker.fast",
+      "orchestrator.default",
+    ]);
+    expect(generation.streamRequests.map((request) => request.modelId)).toEqual(
+      ["orchestrator.default"],
+    );
+    expect(generation.requests[0].internalTools).toEqual(["delegate_llm"]);
+    expect(generation.requests[2].toolResults).toEqual([
+      expect.objectContaining({
+        targetModel: "worker.fast",
+        task: "draft a streamable answer",
+        status: "success",
+        content: "delegate draft",
+        untrusted: true,
+      }),
+    ]);
+    expect(generation.streamRequests[0].internalTools).toBeUndefined();
+    expect(generation.streamRequests[0].toolResults).toEqual([
+      expect.objectContaining({
+        targetModel: "worker.fast",
+        task: "draft a streamable answer",
+        status: "success",
+        content: "delegate draft",
+        untrusted: true,
+      }),
+    ]);
+  });
+
+  it("uses the final stream for direct streaming responses without delegation", async () => {
+    const generation = new ScriptedGenerationPort(
+      [
+        {
+          content: "planning answer should not be emitted",
+          finishReason: "stop",
+        },
+      ],
+      [["streamed ", "direct ", "answer"]],
+    );
+    const service = new OrchestrationService(createConfigService(), generation);
+
+    const chunks = [];
+    for await (const chunk of service.streamFinal(
+      createRequest(routeModel, "hello"),
+      createRuntimeContext(),
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { content: "streamed ", finishReason: null },
+      { content: "direct ", finishReason: null },
+      { content: "answer", finishReason: null },
+      { content: "", finishReason: "stop" },
+    ]);
+    expect(generation.requests.map((request) => request.modelId)).toEqual([
+      "orchestrator.default",
+    ]);
+    expect(generation.streamRequests.map((request) => request.modelId)).toEqual(
+      ["orchestrator.default"],
+    );
+    expect(generation.streamRequests[0].internalTools).toBeUndefined();
+  });
+
+  it("propagates the final stream finish reason", async () => {
+    const generation = new ScriptedGenerationPort(
+      [
+        {
+          content: "planning answer should not be emitted",
+          finishReason: "stop",
+        },
+      ],
+      [
+        {
+          chunks: ["truncated ", "answer"],
+          finishReason: "length",
+        },
+      ],
+    );
+    const service = new OrchestrationService(createConfigService(), generation);
+
+    const chunks = [];
+    for await (const chunk of service.streamFinal(
+      createRequest(routeModel, "hello"),
+      createRuntimeContext(),
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { content: "truncated ", finishReason: null },
+      { content: "answer", finishReason: null },
+      { content: "", finishReason: "length" },
+    ]);
+  });
+
+  it("logs orchestration phases with requestId without prompts or responses", async () => {
+    const generation = new ScriptedGenerationPort(
+      [
+        {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [
+            {
+              id: "call_1",
+              name: "delegate_llm",
+              arguments: {
+                target_model: "worker.fast",
+                task: "draft with prompt secret",
+              },
+            },
+          ],
+          usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 },
+        },
+        {
+          content: "delegate response must not be logged",
+          finishReason: "stop",
+          usage: { promptTokens: 4, completionTokens: 5, totalTokens: 9 },
+        },
+        {
+          content: "ready",
+          finishReason: "stop",
+        },
+      ],
+      [
+        {
+          chunks: ["final response must not be logged"],
+          usage: { promptTokens: 6, completionTokens: 7, totalTokens: 13 },
+        },
+      ],
+    );
+    const logger = new CapturingOperationalLogger();
+    const service = new OrchestrationService(
+      createConfigService(),
+      generation,
+      logger,
+    );
+
+    for await (const chunk of service.streamFinal(
+      createRequest(routeModel, "full prompt must not be logged"),
+      createRuntimeContext(),
+    )) {
+      void chunk;
+      // Drain stream.
+    }
+
+    expect(logger.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event: "llm_invocation.completed",
+          phase: "orchestrator_planning",
+          requestId: "req-orchestration-test",
+          routeId: "default",
+          publicModel: routeModel,
+          internalModel: "orchestrator.default",
+          provider: "openrouter",
+          status: "success",
+        }),
+        expect.objectContaining({
+          event: "llm_invocation.completed",
+          phase: "delegation",
+          requestId: "req-orchestration-test",
+          internalModel: "worker.fast",
+          status: "success",
+        }),
+        expect.objectContaining({
+          event: "llm_invocation.completed",
+          phase: "final_synthesis",
+          requestId: "req-orchestration-test",
+          internalModel: "orchestrator.default",
+          status: "success",
+          usage: {
+            prompt_tokens: 6,
+            completion_tokens: 7,
+            total_tokens: 13,
+          },
+        }),
+      ]),
+    );
+    const serializedEvents = JSON.stringify(logger.events);
+    expect(serializedEvents).not.toContain("full prompt must not be logged");
+    expect(serializedEvents).not.toContain(
+      "delegate response must not be logged",
+    );
+    expect(serializedEvents).not.toContain("final response must not be logged");
+  });
+
+  it("repeats streaming planning until delegations are complete before final synthesis", async () => {
+    const generation = new ScriptedGenerationPort(
+      [
+        {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [
+            {
+              id: "call_1",
+              name: "delegate_llm",
+              arguments: {
+                target_model: "worker.fast",
+                task: "first draft",
+              },
+            },
+          ],
+        },
+        {
+          content: "first delegate",
+          finishReason: "stop",
+        },
+        {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [
+            {
+              id: "call_2",
+              name: "delegate_llm",
+              arguments: {
+                target_model: "worker.fast",
+                task: "second draft",
+              },
+            },
+          ],
+        },
+        {
+          content: "second delegate",
+          finishReason: "stop",
+        },
+        {
+          content: "ready for final stream",
+          finishReason: "stop",
+        },
+      ],
+      [["final answer"]],
+    );
+    const service = new OrchestrationService(createConfigService(), generation);
+
+    const chunks = [];
+    for await (const chunk of service.streamFinal(
+      createRequest(routeModel, "hello"),
+      createRuntimeContext(),
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { content: "final answer", finishReason: null },
+      { content: "", finishReason: "stop" },
+    ]);
+    expect(generation.requests.map((request) => request.modelId)).toEqual([
+      "orchestrator.default",
+      "worker.fast",
+      "orchestrator.default",
+      "worker.fast",
+      "orchestrator.default",
+    ]);
+    expect(generation.requests[2].toolResults).toEqual([
+      expect.objectContaining({
+        targetModel: "worker.fast",
+        task: "first draft",
+        status: "success",
+      }),
+    ]);
+    expect(generation.requests[4].toolResults).toEqual([
+      expect.objectContaining({
+        targetModel: "worker.fast",
+        task: "first draft",
+        status: "success",
+      }),
+      expect.objectContaining({
+        targetModel: "worker.fast",
+        task: "second draft",
+        status: "success",
+      }),
+    ]);
+    expect(generation.streamRequests[0].toolResults).toEqual([
+      expect.objectContaining({
+        targetModel: "worker.fast",
+        task: "first draft",
+      }),
+      expect.objectContaining({
+        targetModel: "worker.fast",
+        task: "second draft",
       }),
     ]);
   });
