@@ -359,7 +359,7 @@ describe("OpenAI-compatible API", () => {
 
   it("routes coding streaming requests to the coding-capable delegate even when the orchestrator answers directly", async () => {
     const codingConfig = minimalConfig();
-    codingConfig.models["worker.fast"].capabilities = ["coding"];
+    codingConfig.models["worker.fast"].capabilities = ["code", "general"];
     const delegatedApp = await createAppWithGenerationPort(
       CodingFallbackGenerationPort,
       codingConfig,
@@ -607,7 +607,7 @@ class CodingFallbackGenerationPort implements LlmGenerationPort {
 
   async *stream(request: LlmGenerateRequest): AsyncIterable<LlmStreamChunk> {
     if (request.modelId !== "worker.fast") {
-      throw OpenAiHttpError.providerError("Expected coding delegate stream.");
+      throw OpenAiHttpError.providerError("Expected code delegate stream.");
     }
 
     yield {

@@ -15,6 +15,10 @@ import {
   OperationalLoggerService,
 } from "../ops/operational-logger.service";
 import {
+  CanonicalRoutingCapability,
+  SPECIALIZED_ROUTING_CAPABILITY_PRIORITY,
+} from "../routing/routing-capabilities";
+import {
   DelegateLlmToolCall,
   DelegateModelContext,
   DelegateToolResult,
@@ -44,10 +48,8 @@ export interface OrchestrationRunContext {
   clientTools?: unknown[];
 }
 
-type CanonicalCapability = "plan" | "code" | "review" | "design" | "general";
-
 interface CapabilityClassification {
-  capability: CanonicalCapability;
+  capability: CanonicalRoutingCapability;
   method: "heuristic" | "default_general";
   confidence?: number;
 }
@@ -61,7 +63,7 @@ type StreamingFinalTarget =
   | {
       kind: "orchestrator_fallback";
       classification: CapabilityClassification;
-      missingCapability: Exclude<CanonicalCapability, "general">;
+      missingCapability: Exclude<CanonicalRoutingCapability, "general">;
     };
 
 @Injectable()
@@ -691,14 +693,7 @@ function classifyRequestCapability(
     .join("\n")
     .toLowerCase();
 
-  const orderedCapabilities: Array<Exclude<CanonicalCapability, "general">> = [
-    "code",
-    "review",
-    "design",
-    "plan",
-  ];
-
-  for (const capability of orderedCapabilities) {
+  for (const capability of SPECIALIZED_ROUTING_CAPABILITY_PRIORITY) {
     if (matchesCapability(content, capability)) {
       return {
         capability,
@@ -716,9 +711,12 @@ function classifyRequestCapability(
 
 function matchesCapability(
   content: string,
-  capability: Exclude<CanonicalCapability, "general">,
+  capability: Exclude<CanonicalRoutingCapability, "general">,
 ): boolean {
-  const keywords: Record<Exclude<CanonicalCapability, "general">, string[]> = {
+  const keywords: Record<
+    Exclude<CanonicalRoutingCapability, "general">,
+    string[]
+  > = {
     code: [
       "codigo",
       "código",
@@ -862,7 +860,7 @@ function enforceStreamingFinalTarget(
 
 function buildBackendResolvedDelegateToolCall(
   request: ChatCompletionRequest,
-  capability: CanonicalCapability,
+  capability: CanonicalRoutingCapability,
   targetModel: string,
 ): DelegateLlmToolCall {
   const task = compactUserTask(request);
@@ -873,8 +871,7 @@ function buildBackendResolvedDelegateToolCall(
       target_model: targetModel,
       task,
       messages: [{ role: "user", content: task }],
-      output_contract:
-        `Answer the user's ${capability} request directly. Return only the final client-visible answer.`,
+      output_contract: `Answer the user's ${capability} request directly. Return only the final client-visible answer.`,
       reason: `The backend classified this streaming request as '${capability}' and selected '${targetModel}' as the final target.`,
     },
   };

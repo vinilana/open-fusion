@@ -163,6 +163,47 @@ describe("GatewayConfigService", () => {
     }
   });
 
+  it("rejects routed streaming routes without an allowed general delegate", () => {
+    const config = minimalConfig();
+    config.models["worker.fast"].capabilities = ["code"];
+    config.models["orchestrator.default"].capabilities = ["general"];
+    const { path, cleanup } = writeConfig(config);
+    try {
+      expectConfigErrorAt(
+        () =>
+          new GatewayConfigService({
+            configPath: path,
+            env: validEnv(),
+          }),
+        "routes.default.allowedDelegateModels",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("rejects routed streaming delegates without a canonical routing capability", () => {
+    const config = minimalConfig();
+    config.models["worker.restricted"].capabilities = ["fast_draft"];
+    config.routes.default.allowedDelegateModels = [
+      "worker.fast",
+      "worker.restricted",
+    ];
+    const { path, cleanup } = writeConfig(config);
+    try {
+      expectConfigErrorAt(
+        () =>
+          new GatewayConfigService({
+            configPath: path,
+            env: validEnv(),
+          }),
+        "routes.default.allowedDelegateModels[1]",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   it("rejects non-boolean client tool route policy", () => {
     const config = minimalConfig();
     config.routes.default.allowClientTools = "yes" as unknown as boolean;

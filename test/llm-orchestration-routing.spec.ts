@@ -787,9 +787,9 @@ describe("LLM orchestration routing", () => {
       expect(generation.requests.map((request) => request.modelId)).toEqual([
         "orchestrator.default",
       ]);
-      expect(generation.streamRequests.map((request) => request.modelId)).toEqual(
-        [`worker.${capability}`],
-      );
+      expect(
+        generation.streamRequests.map((request) => request.modelId),
+      ).toEqual([`worker.${capability}`]);
       expect(generation.streamRequests[0]).toMatchObject({
         role: "delegate",
         messages: [{ role: "user", content: prompt }],
@@ -836,9 +836,9 @@ describe("LLM orchestration routing", () => {
       { content: "code delegate answer", finishReason: null },
       { content: "", finishReason: "stop" },
     ]);
-    expect(generation.streamRequests.map((request) => request.modelId)).toEqual([
-      "worker.code",
-    ]);
+    expect(generation.streamRequests.map((request) => request.modelId)).toEqual(
+      ["worker.code"],
+    );
     expect(generation.streamRequests[0].messages).toEqual([
       { role: "user", content: "write typescript code for a queue" },
     ]);
@@ -874,12 +874,14 @@ describe("LLM orchestration routing", () => {
     expect(generation.requests.map((request) => request.modelId)).toEqual([
       "orchestrator.default",
     ]);
-    expect(generation.streamRequests.map((request) => request.modelId)).toEqual([
-      "orchestrator.default",
-    ]);
+    expect(generation.streamRequests.map((request) => request.modelId)).toEqual(
+      ["orchestrator.default"],
+    );
     expect(generation.streamRequests[0]).toMatchObject({
       role: "orchestrator",
-      messages: [{ role: "user", content: "write typescript code for a queue" }],
+      messages: [
+        { role: "user", content: "write typescript code for a queue" },
+      ],
     });
     expect(generation.streamRequests[0].internalTools).toBeUndefined();
   });
@@ -1063,7 +1065,7 @@ function createConfigService(): GatewayConfigService {
 
 function createCodingConfigService(): GatewayConfigService {
   const config = minimalConfig();
-  config.models["worker.fast"].capabilities = ["code"];
+  config.models["worker.fast"].capabilities = ["code", "general"];
   return new GatewayConfigService({
     rawConfig: config,
     env: validEnv(),
