@@ -1083,6 +1083,19 @@ describe("LLM orchestration routing", () => {
         .filter((request) => request.role === "delegate")
         .map((request) => request.messages[0]?.content),
     ).toEqual(["write draft", "review draft"]);
+    const delegateRequests = generation.requests.filter(
+      (request) => request.role === "delegate",
+    );
+    expect(delegateRequests[0].toolResults).toBeUndefined();
+    expect(delegateRequests[1].toolResults).toEqual([
+      expect.objectContaining({
+        targetModel: "worker.fast",
+        task: "write draft",
+        status: "success",
+        content: "result for write draft",
+        untrusted: true,
+      }),
+    ]);
     expect(
       generation.streamRequests[0].toolResults?.map((result) => result.task),
     ).toEqual(["write draft", "review draft"]);

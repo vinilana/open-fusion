@@ -546,6 +546,7 @@ export class OrchestrationService {
   ): Promise<DelegateToolResult[]> {
     const pending = new Map(tasks.map((task) => [task.id, task]));
     const completed = new Set<string>();
+    const resultByTaskId = new Map<string, DelegateToolResult>();
     const results: DelegateToolResult[] = [];
     let parallelBatchCount = 0;
     let maxParallelTasks = 0;
@@ -570,6 +571,18 @@ export class OrchestrationService {
             route,
             task.toolCall,
             deadline,
+            task.dependencies.length > 0
+              ? task.dependencies.map((dependency) => {
+                  const dependencyResult = resultByTaskId.get(dependency);
+                  if (!dependencyResult) {
+                    throw OpenAiHttpError.providerError(
+                      `Execution graph dependency '${dependency}' was not available for task '${task.id}'.`,
+                    );
+                  }
+
+                  return dependencyResult;
+                })
+              : undefined,
           ),
         ),
       );
@@ -583,6 +596,7 @@ export class OrchestrationService {
         }
         completed.add(task.id);
         pending.delete(task.id);
+        resultByTaskId.set(task.id, result);
         results.push(result);
       });
     }
@@ -602,6 +616,7 @@ export class OrchestrationService {
     route: RouteConfig,
     toolCall: DelegateLlmToolCall,
     deadline: number,
+    toolResults?: DelegateToolResult[],
   ): Promise<DelegateToolResult> {
     const targetModel = toolCall.arguments.target_model;
     const task = toolCall.arguments.task;
@@ -651,6 +666,7 @@ export class OrchestrationService {
           role: "delegate",
           messages: buildDelegateMessages(toolCall),
           system: toolCall.arguments.output_contract,
+          toolResults,
           streamFinalOnly: route.streamFinalOnly,
           timeoutMs: delegateTimeoutMs,
         }),
