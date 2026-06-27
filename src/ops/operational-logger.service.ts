@@ -50,6 +50,27 @@ export interface LlmInvocationLogEvent {
   };
 }
 
+export interface RoutingLogEvent {
+  event:
+    | "routing.classified"
+    | "routing.execution_graph.validated"
+    | "routing.execution_graph.executed";
+  requestId: string;
+  routeId: string;
+  publicModel: string;
+  classifiedCapability?: string;
+  classificationMethod?: string;
+  classificationConfidence?: number;
+  finalTargetType?: "delegate" | "orchestrator_fallback";
+  finalTargetModel?: string;
+  missingCapability?: string;
+  preFinalTaskCount?: number;
+  dependencyCount?: number;
+  delegationAttemptCount?: number;
+  parallelBatchCount?: number;
+  maxParallelTasks?: number;
+}
+
 @Injectable()
 export class OperationalLoggerService {
   logChatCompletion(event: ChatCompletionLogEvent): void {
@@ -57,6 +78,10 @@ export class OperationalLoggerService {
   }
 
   logLlmInvocation(event: LlmInvocationLogEvent): void {
+    console.log(JSON.stringify(event));
+  }
+
+  logRouting(event: RoutingLogEvent): void {
     console.log(JSON.stringify(event));
   }
 

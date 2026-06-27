@@ -13,6 +13,7 @@ import { redactSensitive } from "../errors/redact-sensitive";
 import {
   LlmInvocationLogEvent,
   OperationalLoggerService,
+  RoutingLogEvent,
 } from "../ops/operational-logger.service";
 import {
   CanonicalRoutingCapability,
@@ -161,6 +162,12 @@ export class OrchestrationService {
       route,
       delegateModels,
       classification,
+    );
+    this.logRoutingClassified(
+      context,
+      route,
+      classification,
+      resolvedFinalTarget,
     );
     const planning = await this.runStreamingRouterPlanning(
       request,
@@ -320,6 +327,7 @@ export class OrchestrationService {
       delegateModels,
     );
     validateStreamingExecutionGraph(graph, route, delegateModels);
+    this.logRoutingGraphValidated(context, route, graph);
     const preFinalToolResults = await this.executePreFinalAgentTasks(
       request,
       context,
@@ -539,6 +547,8 @@ export class OrchestrationService {
     const pending = new Map(tasks.map((task) => [task.id, task]));
     const completed = new Set<string>();
     const results: DelegateToolResult[] = [];
+    let parallelBatchCount = 0;
+    let maxParallelTasks = 0;
 
     while (pending.size > 0) {
       const ready = [...pending.values()].filter((task) =>
@@ -549,6 +559,8 @@ export class OrchestrationService {
           "Validated execution graph could not make progress.",
         );
       }
+      parallelBatchCount += 1;
+      maxParallelTasks = Math.max(maxParallelTasks, ready.length);
 
       const batchResults = await Promise.all(
         ready.map((task) =>
@@ -574,6 +586,12 @@ export class OrchestrationService {
         results.push(result);
       });
     }
+
+    this.logRoutingGraphExecuted(context, route, {
+      preFinalTaskCount: tasks.length,
+      parallelBatchCount,
+      maxParallelTasks,
+    });
 
     return results;
   }
@@ -738,6 +756,69 @@ export class OrchestrationService {
       error: normalizeLogError(error, this.operationalLogger),
     });
   }
+
+  private logRoutingClassified(
+    context: OrchestrationRunContext,
+    route: RouteConfig,
+    classification: CapabilityClassification,
+    finalTarget: StreamingFinalTarget,
+  ): void {
+    this.operationalLogger?.logRouting({
+      event: "routing.classified",
+      ...this.createRoutingLogBase(context, route),
+      classifiedCapability: classification.capability,
+      classificationMethod: classification.method,
+      classificationConfidence: classification.confidence,
+      ...toFinalTargetLogFields(finalTarget),
+    });
+  }
+
+  private logRoutingGraphValidated(
+    context: OrchestrationRunContext,
+    route: RouteConfig,
+    graph: StreamingExecutionGraph,
+  ): void {
+    this.operationalLogger?.logRouting({
+      event: "routing.execution_graph.validated",
+      ...this.createRoutingLogBase(context, route),
+      preFinalTaskCount: graph.preFinalTasks.length,
+      dependencyCount: graph.preFinalTasks.reduce(
+        (total, task) => total + task.dependencies.length,
+        0,
+      ),
+      delegationAttemptCount: graph.delegationAttemptCount,
+      ...toFinalTargetLogFields(graph.finalTarget),
+    });
+  }
+
+  private logRoutingGraphExecuted(
+    context: OrchestrationRunContext,
+    route: RouteConfig,
+    summary: {
+      preFinalTaskCount: number;
+      parallelBatchCount: number;
+      maxParallelTasks: number;
+    },
+  ): void {
+    this.operationalLogger?.logRouting({
+      event: "routing.execution_graph.executed",
+      ...this.createRoutingLogBase(context, route),
+      preFinalTaskCount: summary.preFinalTaskCount,
+      parallelBatchCount: summary.parallelBatchCount,
+      maxParallelTasks: summary.maxParallelTasks,
+    });
+  }
+
+  private createRoutingLogBase(
+    context: OrchestrationRunContext,
+    route: RouteConfig,
+  ): Pick<RoutingLogEvent, "requestId" | "routeId" | "publicModel"> {
+    return {
+      requestId: context.requestId ?? "",
+      routeId: context.routeId ?? route.id,
+      publicModel: route.publicModel,
+    };
+  }
 }
 
 function buildDelegateMessages(
@@ -751,6 +832,25 @@ function buildDelegateMessages(
   }
 
   return [{ role: "user", content: toolCall.arguments.task }];
+}
+
+function toFinalTargetLogFields(
+  finalTarget: StreamingFinalTarget,
+): Pick<
+  RoutingLogEvent,
+  "finalTargetType" | "finalTargetModel" | "missingCapability"
+> {
+  if (finalTarget.kind === "delegate") {
+    return {
+      finalTargetType: "delegate",
+      finalTargetModel: finalTarget.toolCall.arguments.target_model,
+    };
+  }
+
+  return {
+    finalTargetType: "orchestrator_fallback",
+    missingCapability: finalTarget.missingCapability,
+  };
 }
 
 function classifyRequestCapability(

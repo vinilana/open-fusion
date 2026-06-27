@@ -73,6 +73,10 @@ class CapturingOperationalLogger {
     this.events.push(event);
   }
 
+  logRouting(event: unknown): void {
+    this.events.push(event);
+  }
+
   logChatCompletion(): void {
     throw new Error("Chat completion logs are not expected in this unit test.");
   }
@@ -1287,6 +1291,76 @@ describe("LLM orchestration routing", () => {
     expect(serializedEvents).not.toContain(
       "delegate response must not be logged",
     );
+  });
+
+  it("logs routing classification, graph summary, and parallel execution without internal content", async () => {
+    const generation = new ParallelPreFinalGenerationPort([
+      {
+        id: "context_a",
+        targetModel: "worker.fast",
+        task: "collect context A",
+        dependencies: [],
+      },
+      {
+        id: "context_b",
+        targetModel: "worker.fast",
+        task: "collect context B",
+        dependencies: [],
+      },
+    ]);
+    const logger = new CapturingOperationalLogger();
+    const service = new OrchestrationService(
+      createConfigService(),
+      generation,
+      logger,
+    );
+
+    for await (const chunk of service.streamFinal(
+      createRequest(routeModel, "explain HTTP caching with private context"),
+      createRuntimeContext(),
+    )) {
+      void chunk;
+    }
+
+    expect(logger.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event: "routing.classified",
+          requestId: "req-orchestration-test",
+          routeId: "default",
+          publicModel: routeModel,
+          classifiedCapability: "general",
+          classificationMethod: "default_general",
+          finalTargetType: "delegate",
+          finalTargetModel: "worker.fast",
+        }),
+        expect.objectContaining({
+          event: "routing.execution_graph.validated",
+          requestId: "req-orchestration-test",
+          routeId: "default",
+          publicModel: routeModel,
+          preFinalTaskCount: 2,
+          dependencyCount: 0,
+          delegationAttemptCount: 3,
+          finalTargetType: "delegate",
+          finalTargetModel: "worker.fast",
+        }),
+        expect.objectContaining({
+          event: "routing.execution_graph.executed",
+          requestId: "req-orchestration-test",
+          routeId: "default",
+          publicModel: routeModel,
+          preFinalTaskCount: 2,
+          parallelBatchCount: 1,
+          maxParallelTasks: 2,
+        }),
+      ]),
+    );
+    const serializedEvents = JSON.stringify(logger.events);
+    expect(serializedEvents).not.toContain("explain HTTP caching");
+    expect(serializedEvents).not.toContain("collect context A");
+    expect(serializedEvents).not.toContain("collect context B");
+    expect(serializedEvents).not.toContain("result for");
   });
 
   it("rejects multiple streaming delegate targets before opening the delegate stream", async () => {
