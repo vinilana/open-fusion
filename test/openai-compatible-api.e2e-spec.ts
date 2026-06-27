@@ -391,6 +391,38 @@ describe("OpenAI-compatible API", () => {
     }
   });
 
+  it("does not expose pre-final agent outputs or graph metadata in SSE chunks", async () => {
+    const graphApp = await createAppWithGenerationPort(
+      PreFinalTraceGenerationPort,
+    );
+
+    try {
+      const response = await request(graphApp.app.getHttpServer())
+        .post("/v1/chat/completions")
+        .set("Authorization", "Bearer test-gateway-key")
+        .send({
+          model: "route/default",
+          stream: true,
+          messages: [{ role: "user", content: "stream with internal prep" }],
+        })
+        .expect(200);
+
+      expect(accumulateStreamContent(response.text)).toBe(
+        "client visible final",
+      );
+      expect(response.text).not.toContain("delegate_llm");
+      expect(response.text).not.toContain("target_model");
+      expect(response.text).not.toContain("task_id");
+      expect(response.text).not.toContain("depends_on");
+      expect(response.text).not.toContain("collect private context");
+      expect(response.text).not.toContain("RAW_PREFINAL_RESULT");
+      expect(response.text).not.toContain("EXECUTION_GRAPH_METADATA");
+      expect(response.text.trim().endsWith("data: [DONE]")).toBe(true);
+    } finally {
+      await graphApp.close();
+    }
+  });
+
   it("returns a JSON error before opening SSE when streaming orchestration fails before the first chunk", async () => {
     const failingApp = await createAppWithGenerationPort(
       FailingBeforeFirstChunkGenerationPort,
@@ -621,6 +653,74 @@ class CodingFallbackGenerationPort implements LlmGenerationPort {
         promptTokens: 4,
         completionTokens: 5,
         totalTokens: 9,
+      },
+    };
+  }
+}
+
+class PreFinalTraceGenerationPort implements LlmGenerationPort {
+  async generate(request: LlmGenerateRequest): Promise<LlmGenerateResult> {
+    if (request.role === "orchestrator") {
+      return {
+        content: "EXECUTION_GRAPH_METADATA should stay internal",
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "call_context",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.fast",
+              task: "collect private context",
+              task_id: "context",
+              final: false,
+            },
+          },
+          {
+            id: "call_audit",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.fast",
+              task: "collect private audit",
+              task_id: "audit",
+              final: false,
+            },
+          },
+        ],
+      };
+    }
+
+    return {
+      content: `RAW_PREFINAL_RESULT for ${request.messages[0]?.content}`,
+      finishReason: "stop",
+      usage: {
+        promptTokens: 1,
+        completionTokens: 1,
+        totalTokens: 2,
+      },
+    };
+  }
+
+  async *stream(request: LlmGenerateRequest): AsyncIterable<LlmStreamChunk> {
+    if (request.modelId !== "worker.fast") {
+      throw OpenAiHttpError.providerError("Expected final delegate stream.");
+    }
+    if (!request.toolResults || request.toolResults.length !== 2) {
+      throw OpenAiHttpError.providerError(
+        "Expected internal pre-final tool results before streaming.",
+      );
+    }
+
+    yield {
+      content: "client visible final",
+      finishReason: null,
+    };
+    yield {
+      content: "",
+      finishReason: "stop",
+      usage: {
+        promptTokens: 2,
+        completionTokens: 3,
+        totalTokens: 5,
       },
     };
   }
