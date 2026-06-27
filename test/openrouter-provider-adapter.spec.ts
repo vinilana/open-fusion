@@ -310,9 +310,16 @@ describe("OpenRouter provider adapter", () => {
     });
   });
 
-  it("normalizes provider failures without leaking credentials", async () => {
+  it("normalizes provider failures without leaking raw provider details", async () => {
     const sdk = createFakeSdk(
-      new Error("OpenRouter failed for apiKey sk-openrouter"),
+      new Error(
+        [
+          "OpenRouter failed for apiKey sk-openrouter",
+          "Authorization: Bearer provider-token",
+          "prompt: full private prompt",
+          "at provider stack trace",
+        ].join("\n"),
+      ),
     );
     const adapter = new OpenRouterAdapter(sdk);
     const config = createConfig();
@@ -327,6 +334,13 @@ describe("OpenRouter provider adapter", () => {
       status: 502,
       code: "provider_error",
     });
+    await expect(
+      adapter.generate(
+        config.getProvider("openrouter")!,
+        config.findInternalModel("worker.fast")!,
+        createGenerateRequest("worker.fast"),
+      ),
+    ).rejects.toThrow("The provider failed to complete the request.");
 
     await expect(
       adapter.generate(
@@ -335,6 +349,36 @@ describe("OpenRouter provider adapter", () => {
         createGenerateRequest("worker.fast"),
       ),
     ).rejects.not.toThrow("sk-openrouter");
+
+    await expect(
+      adapter.generate(
+        config.getProvider("openrouter")!,
+        config.findInternalModel("worker.fast")!,
+        createGenerateRequest("worker.fast"),
+      ),
+    ).rejects.not.toThrow("full private prompt");
+
+    await expect(async () => {
+      for await (const chunk of adapter.stream(
+        config.getProvider("openrouter")!,
+        config.findInternalModel("worker.fast")!,
+        createGenerateRequest("worker.fast"),
+      )) {
+        void chunk;
+      }
+    }).rejects.toMatchObject({
+      status: 502,
+      code: "provider_error",
+    });
+    await expect(async () => {
+      for await (const chunk of adapter.stream(
+        config.getProvider("openrouter")!,
+        config.findInternalModel("worker.fast")!,
+        createGenerateRequest("worker.fast"),
+      )) {
+        void chunk;
+      }
+    }).rejects.toThrow("The provider failed to complete the request.");
   });
 
   it("resolves configured model provider through the provider-backed generation port", async () => {

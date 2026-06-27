@@ -143,10 +143,8 @@ export class OpenRouterAdapter implements ProviderAdapter {
         toolCalls: toDelegateToolCalls(result.toolCalls),
         usage: toUsage(result.totalUsage),
       };
-    } catch (error) {
-      throw OpenAiHttpError.providerError(
-        `Provider 'openrouter' failed: ${getErrorMessage(error)}`,
-      );
+    } catch {
+      throw OpenAiHttpError.providerError();
     }
   }
 
@@ -186,10 +184,8 @@ export class OpenRouterAdapter implements ProviderAdapter {
         finishReason: normalizeFinishReason(await result.finishReason),
         usage: toUsage(await result.totalUsage),
       };
-    } catch (error) {
-      throw OpenAiHttpError.providerError(
-        `Provider 'openrouter' failed: ${getErrorMessage(error)}`,
-      );
+    } catch {
+      throw OpenAiHttpError.providerError();
     }
   }
 }
@@ -438,8 +434,4 @@ function toUsage(usage: OpenRouterUsage | undefined): LlmUsage {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
