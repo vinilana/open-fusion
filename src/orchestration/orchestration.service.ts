@@ -44,6 +44,26 @@ export interface OrchestrationRunContext {
   clientTools?: unknown[];
 }
 
+type CanonicalCapability = "plan" | "code" | "review" | "design" | "general";
+
+interface CapabilityClassification {
+  capability: CanonicalCapability;
+  method: "heuristic" | "default_general";
+  confidence?: number;
+}
+
+type StreamingFinalTarget =
+  | {
+      kind: "delegate";
+      classification: CapabilityClassification;
+      toolCall: DelegateLlmToolCall;
+    }
+  | {
+      kind: "orchestrator_fallback";
+      classification: CapabilityClassification;
+      missingCapability: Exclude<CanonicalCapability, "general">;
+    };
+
 @Injectable()
 export class OrchestrationService {
   constructor(
@@ -120,20 +140,29 @@ export class OrchestrationService {
 
     const delegateModels = this.config.listAllowedDelegateModels(route);
     const deadline = Date.now() + route.timeoutMs;
+    const classification = classifyRequestCapability(request);
+    const resolvedFinalTarget = resolveStreamingFinalTarget(
+      request,
+      route,
+      delegateModels,
+      classification,
+    );
     const planning = await this.runStreamingRouterPlanning(
       request,
       context,
       route,
       delegateModels,
       deadline,
+      classification,
+      resolvedFinalTarget,
     );
 
-    if (planning.delegateToolCall) {
+    if (planning.finalTarget.kind === "delegate") {
       yield* this.streamRoutedDelegate(
         request,
         context,
         route,
-        planning.delegateToolCall,
+        planning.finalTarget.toolCall,
         deadline,
       );
       return;
@@ -204,8 +233,10 @@ export class OrchestrationService {
     route: RouteConfig,
     delegateModels: DelegateModelContext[],
     deadline: number,
+    classification: CapabilityClassification,
+    resolvedFinalTarget: StreamingFinalTarget,
   ): Promise<{
-    delegateToolCall?: DelegateLlmToolCall;
+    finalTarget: StreamingFinalTarget;
   }> {
     const orchestratorTimeoutMs = remainingMs(deadline, route);
     const planningLogContext = this.createInvocationLogContext({
@@ -228,7 +259,12 @@ export class OrchestrationService {
           routeId: context.routeId ?? route.id,
           role: "orchestrator",
           messages: request.messages,
-          system: buildStreamingRouterSystemPrompt(route, delegateModels),
+          system: buildStreamingRouterSystemPrompt(
+            route,
+            delegateModels,
+            classification,
+            resolvedFinalTarget,
+          ),
           delegateModels,
           internalTools: ["delegate_llm"],
           clientTools: context.clientTools,
@@ -251,17 +287,9 @@ export class OrchestrationService {
       orchestratorResult.toolCalls === undefined ||
       orchestratorResult.toolCalls.length === 0
     ) {
-      const fallbackDelegate = selectCapabilityDelegate(
-        request,
-        delegateModels,
-        "coding",
-      );
-      if (fallbackDelegate) {
-        return {
-          delegateToolCall: fallbackDelegate,
-        };
-      }
-      return {};
+      return {
+        finalTarget: resolvedFinalTarget,
+      };
     }
 
     const delegateToolCalls = orchestratorResult.toolCalls.filter(
@@ -279,7 +307,11 @@ export class OrchestrationService {
     }
 
     return {
-      delegateToolCall: delegateToolCalls[0],
+      finalTarget: enforceStreamingFinalTarget(
+        delegateToolCalls[0],
+        resolvedFinalTarget,
+        delegateModels,
+      ),
     };
   }
 
@@ -651,68 +683,201 @@ function buildDelegateMessages(
   return [{ role: "user", content: toolCall.arguments.task }];
 }
 
-function selectCapabilityDelegate(
+function classifyRequestCapability(
   request: ChatCompletionRequest,
-  delegateModels: DelegateModelContext[],
-  capability: string,
-): DelegateLlmToolCall | undefined {
-  if (capability !== "coding" || !isCodingRequest(request)) {
-    return undefined;
-  }
-
-  const delegate = delegateModels.find((model) =>
-    model.capabilities.includes("coding"),
-  );
-  if (!delegate) {
-    return undefined;
-  }
-
-  const task = compactUserTask(request);
-  return {
-    id: `auto_${capability}_delegate`,
-    name: "delegate_llm",
-    arguments: {
-      target_model: delegate.id,
-      task,
-      messages: [{ role: "user", content: task }],
-      output_contract:
-        "Answer the user's coding request directly. Return concise, runnable code when appropriate.",
-      reason: `The active route has a delegate model with '${capability}' capability and the request is a coding task.`,
-    },
-  };
-}
-
-function isCodingRequest(request: ChatCompletionRequest): boolean {
+): CapabilityClassification {
   const content = request.messages
     .map((message) => message.content ?? "")
     .join("\n")
     .toLowerCase();
 
-  return [
-    "codigo",
-    "código",
+  const orderedCapabilities: Array<Exclude<CanonicalCapability, "general">> = [
     "code",
-    "python",
-    "javascript",
-    "typescript",
-    "html",
-    "css",
-    "sql",
-    "bash",
-    "shell",
-    "script",
-    "programa",
-    "função",
-    "funcao",
-    "classe",
-    "debug",
-    "bug",
-    "stack trace",
-    "refator",
-    "implemente",
-    "printar",
-    "hello world",
-  ].some((keyword) => content.includes(keyword));
+    "review",
+    "design",
+    "plan",
+  ];
+
+  for (const capability of orderedCapabilities) {
+    if (matchesCapability(content, capability)) {
+      return {
+        capability,
+        method: "heuristic",
+        confidence: 0.8,
+      };
+    }
+  }
+
+  return {
+    capability: "general",
+    method: "default_general",
+  };
+}
+
+function matchesCapability(
+  content: string,
+  capability: Exclude<CanonicalCapability, "general">,
+): boolean {
+  const keywords: Record<Exclude<CanonicalCapability, "general">, string[]> = {
+    code: [
+      "codigo",
+      "código",
+      "code",
+      "python",
+      "javascript",
+      "typescript",
+      "html",
+      "css",
+      "sql",
+      "bash",
+      "shell",
+      "script",
+      "programa",
+      "função",
+      "funcao",
+      "classe",
+      "debug",
+      "bug",
+      "stack trace",
+      "refator",
+      "implemente",
+      "implementar",
+      "printar",
+      "hello world",
+    ],
+    review: [
+      "review",
+      "revise",
+      "revisar",
+      "audite",
+      "auditar",
+      "critique",
+      "analise criticamente",
+      "riscos",
+      "regressão",
+      "regressao",
+      "segurança",
+      "seguranca",
+      "correção",
+      "correcao",
+      "quality",
+    ],
+    design: [
+      "design",
+      "desenhe",
+      "ux",
+      "ui",
+      "interface",
+      "wireframe",
+      "protótipo",
+      "prototipo",
+      "layout",
+      "tela",
+      "checkout",
+      "design system",
+      "fluxo de usuário",
+      "fluxo de usuario",
+    ],
+    plan: [
+      "plano",
+      "planeje",
+      "planejar",
+      "roadmap",
+      "estratégia",
+      "estrategia",
+      "arquitetura",
+      "decomponha",
+      "decompor",
+      "passo a passo",
+      "implementation plan",
+    ],
+  };
+
+  return keywords[capability].some((keyword) => content.includes(keyword));
+}
+
+function resolveStreamingFinalTarget(
+  request: ChatCompletionRequest,
+  route: RouteConfig,
+  delegateModels: DelegateModelContext[],
+  classification: CapabilityClassification,
+): StreamingFinalTarget {
+  const delegate = delegateModels.find((model) =>
+    model.capabilities.includes(classification.capability),
+  );
+
+  if (delegate) {
+    return {
+      kind: "delegate",
+      classification,
+      toolCall: buildBackendResolvedDelegateToolCall(
+        request,
+        classification.capability,
+        delegate.id,
+      ),
+    };
+  }
+
+  if (classification.capability === "general") {
+    throw OpenAiHttpError.invalidRequest(
+      `Route '${route.id}' must expose an allowed general delegate for routed streaming.`,
+      "allowedDelegateModels",
+    );
+  }
+
+  return {
+    kind: "orchestrator_fallback",
+    classification,
+    missingCapability: classification.capability,
+  };
+}
+
+function enforceStreamingFinalTarget(
+  proposedToolCall: DelegateLlmToolCall,
+  resolvedFinalTarget: StreamingFinalTarget,
+  delegateModels: DelegateModelContext[],
+): StreamingFinalTarget {
+  if (resolvedFinalTarget.kind === "orchestrator_fallback") {
+    return resolvedFinalTarget;
+  }
+
+  const proposedTarget = proposedToolCall.arguments.target_model;
+  const proposedModel = delegateModels.find(
+    (model) => model.id === proposedTarget,
+  );
+  const hasRequiredCapability =
+    proposedModel?.capabilities.includes(
+      resolvedFinalTarget.classification.capability,
+    ) === true;
+
+  if (hasRequiredCapability) {
+    return {
+      ...resolvedFinalTarget,
+      toolCall: proposedToolCall,
+    };
+  }
+
+  return resolvedFinalTarget;
+}
+
+function buildBackendResolvedDelegateToolCall(
+  request: ChatCompletionRequest,
+  capability: CanonicalCapability,
+  targetModel: string,
+): DelegateLlmToolCall {
+  const task = compactUserTask(request);
+  return {
+    id: `auto_${capability}_final_target`,
+    name: "delegate_llm",
+    arguments: {
+      target_model: targetModel,
+      task,
+      messages: [{ role: "user", content: task }],
+      output_contract:
+        `Answer the user's ${capability} request directly. Return only the final client-visible answer.`,
+      reason: `The backend classified this streaming request as '${capability}' and selected '${targetModel}' as the final target.`,
+    },
+  };
 }
 
 function compactUserTask(request: ChatCompletionRequest): string {
@@ -752,12 +917,20 @@ function buildOrchestratorSystemPrompt(
 function buildStreamingRouterSystemPrompt(
   route: RouteConfig,
   delegateModels: DelegateModelContext[],
+  classification: CapabilityClassification,
+  finalTarget: StreamingFinalTarget,
 ): string {
+  const targetInstruction =
+    finalTarget.kind === "delegate"
+      ? `The backend classified this request as '${classification.capability}' by ${classification.method} and selected '${finalTarget.toolCall.arguments.target_model}' as the final streaming delegate target.`
+      : `The backend classified this request as '${classification.capability}' by ${classification.method}; no exact delegate exists, so the final streaming target is orchestrator_fallback.`;
+
   return [
     buildOrchestratorSystemPrompt(route, delegateModels),
     "For streaming requests, act only as a router.",
-    "If you use delegate_llm, choose exactly one allowed delegate model.",
-    "For coding, programming, debugging, code generation, scripts, HTML/CSS/SQL, or implementation requests, you must route to a delegate model that declares the coding capability.",
+    "Canonical routing capabilities are plan, code, review, design, and general.",
+    targetInstruction,
+    "If you use delegate_llm, choose exactly one allowed delegate model with the classified capability.",
     "The delegated model response will be streamed directly to the client with no final synthesis.",
     "Therefore the delegate task or messages must contain the complete client-visible work, not a partial draft.",
   ].join(" ");

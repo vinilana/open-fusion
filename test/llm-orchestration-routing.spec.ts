@@ -666,7 +666,7 @@ describe("LLM orchestration routing", () => {
     expect(generation.streamRequests[0].toolResults).toBeUndefined();
   });
 
-  it("uses the final stream for direct streaming responses without delegation", async () => {
+  it("uses a general delegate final stream when the orchestrator answers directly", async () => {
     const generation = new ScriptedGenerationPort(
       [
         {
@@ -696,7 +696,7 @@ describe("LLM orchestration routing", () => {
       "orchestrator.default",
     ]);
     expect(generation.streamRequests.map((request) => request.modelId)).toEqual(
-      ["orchestrator.default"],
+      ["worker.fast"],
     );
     expect(generation.streamRequests[0].internalTools).toBeUndefined();
   });
@@ -745,8 +745,143 @@ describe("LLM orchestration routing", () => {
           content: "faça um codigo python para printar hello world",
         },
       ],
-      system: expect.stringContaining("coding"),
+      system: expect.stringContaining("code"),
     });
+  });
+
+  it.each([
+    ["code", "implemente uma função typescript para somar números"],
+    ["review", "revise este patch e encontre riscos de regressão"],
+    ["design", "desenhe o fluxo de uma tela de checkout mobile"],
+    ["plan", "crie um plano de implementação para autenticação"],
+    ["general", "explique a diferença entre HTTP e HTTPS"],
+  ])(
+    "routes %s streaming requests to a matching canonical delegate when the orchestrator answers directly",
+    async (capability, prompt) => {
+      const generation = new ScriptedGenerationPort(
+        [
+          {
+            content: "orchestrator planning text must not be streamed",
+            finishReason: "stop",
+          },
+        ],
+        [[`${capability} delegate answer`]],
+      );
+      const service = new OrchestrationService(
+        createCanonicalCapabilityConfigService(),
+        generation,
+      );
+
+      const chunks = [];
+      for await (const chunk of service.streamFinal(
+        createRequest(routeModel, prompt),
+        createRuntimeContext(),
+      )) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks).toEqual([
+        { content: `${capability} delegate answer`, finishReason: null },
+        { content: "", finishReason: "stop" },
+      ]);
+      expect(generation.requests.map((request) => request.modelId)).toEqual([
+        "orchestrator.default",
+      ]);
+      expect(generation.streamRequests.map((request) => request.modelId)).toEqual(
+        [`worker.${capability}`],
+      );
+      expect(generation.streamRequests[0]).toMatchObject({
+        role: "delegate",
+        messages: [{ role: "user", content: prompt }],
+      });
+      expect(generation.streamRequests[0].internalTools).toBeUndefined();
+      expect(generation.streamRequests[0].toolResults).toBeUndefined();
+    },
+  );
+
+  it("corrects a streaming final target when the orchestrator chooses a delegate without the classified capability", async () => {
+    const generation = new ScriptedGenerationPort(
+      [
+        {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [
+            {
+              id: "call_wrong",
+              name: "delegate_llm",
+              arguments: {
+                target_model: "worker.general",
+                task: "answer as a generalist",
+              },
+            },
+          ],
+        },
+      ],
+      [["code delegate answer"]],
+    );
+    const service = new OrchestrationService(
+      createCanonicalCapabilityConfigService(),
+      generation,
+    );
+
+    const chunks = [];
+    for await (const chunk of service.streamFinal(
+      createRequest(routeModel, "write typescript code for a queue"),
+      createRuntimeContext(),
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { content: "code delegate answer", finishReason: null },
+      { content: "", finishReason: "stop" },
+    ]);
+    expect(generation.streamRequests.map((request) => request.modelId)).toEqual([
+      "worker.code",
+    ]);
+    expect(generation.streamRequests[0].messages).toEqual([
+      { role: "user", content: "write typescript code for a queue" },
+    ]);
+  });
+
+  it("uses orchestrator fallback for specialized streaming requests when no exact delegate exists", async () => {
+    const generation = new ScriptedGenerationPort(
+      [
+        {
+          content: "planning text must not be streamed",
+          finishReason: "stop",
+        },
+      ],
+      [["fallback streamed answer"]],
+    );
+    const service = new OrchestrationService(
+      createGeneralOnlyConfigService(),
+      generation,
+    );
+
+    const chunks = [];
+    for await (const chunk of service.streamFinal(
+      createRequest(routeModel, "write typescript code for a queue"),
+      createRuntimeContext(),
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { content: "fallback streamed answer", finishReason: null },
+      { content: "", finishReason: "stop" },
+    ]);
+    expect(generation.requests.map((request) => request.modelId)).toEqual([
+      "orchestrator.default",
+    ]);
+    expect(generation.streamRequests.map((request) => request.modelId)).toEqual([
+      "orchestrator.default",
+    ]);
+    expect(generation.streamRequests[0]).toMatchObject({
+      role: "orchestrator",
+      messages: [{ role: "user", content: "write typescript code for a queue" }],
+    });
+    expect(generation.streamRequests[0].internalTools).toBeUndefined();
   });
 
   it("propagates the final stream finish reason", async () => {
@@ -928,7 +1063,66 @@ function createConfigService(): GatewayConfigService {
 
 function createCodingConfigService(): GatewayConfigService {
   const config = minimalConfig();
-  config.models["worker.fast"].capabilities = ["coding"];
+  config.models["worker.fast"].capabilities = ["code"];
+  return new GatewayConfigService({
+    rawConfig: config,
+    env: validEnv(),
+  });
+}
+
+function createCanonicalCapabilityConfigService(): GatewayConfigService {
+  const config = minimalConfig();
+  config.models = {
+    ...config.models,
+    "worker.code": {
+      provider: "openrouter",
+      model: "openai/gpt-4.1-mini",
+      role: "delegate",
+      capabilities: ["code"],
+    },
+    "worker.review": {
+      provider: "openrouter",
+      model: "openai/gpt-4.1-mini",
+      role: "delegate",
+      capabilities: ["review"],
+    },
+    "worker.design": {
+      provider: "openrouter",
+      model: "openai/gpt-4.1-mini",
+      role: "delegate",
+      capabilities: ["design"],
+    },
+    "worker.plan": {
+      provider: "openrouter",
+      model: "openai/gpt-4.1-mini",
+      role: "delegate",
+      capabilities: ["plan"],
+    },
+    "worker.general": {
+      provider: "openrouter",
+      model: "openai/gpt-4.1-mini",
+      role: "delegate",
+      capabilities: ["general"],
+    },
+  };
+  config.routes.default.allowedDelegateModels = [
+    "worker.code",
+    "worker.review",
+    "worker.design",
+    "worker.plan",
+    "worker.general",
+  ];
+
+  return new GatewayConfigService({
+    rawConfig: config,
+    env: validEnv(),
+  });
+}
+
+function createGeneralOnlyConfigService(): GatewayConfigService {
+  const config = minimalConfig();
+  config.models["worker.fast"].capabilities = ["general"];
+
   return new GatewayConfigService({
     rawConfig: config,
     env: validEnv(),
