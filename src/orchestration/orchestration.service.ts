@@ -205,22 +205,26 @@ export class OrchestrationService {
     });
 
     try {
-      for await (const chunk of this.generation.stream({
-        modelId: route.orchestrator,
-        publicModelId: route.publicModel,
-        requestId: context.requestId,
-        routeId: context.routeId ?? route.id,
-        role: "orchestrator",
-        messages: request.messages,
-        system: buildFinalSynthesisSystemPrompt(route),
-        clientTools: context.clientTools,
-        toolResults:
-          planning.preFinalToolResults.length > 0
-            ? planning.preFinalToolResults
-            : undefined,
-        streamFinalOnly: context.streamFinalOnly ?? route.streamFinalOnly,
-        timeoutMs: synthesisTimeoutMs,
-      })) {
+      for await (const chunk of streamWithDeadline(
+        this.generation.stream({
+          modelId: route.orchestrator,
+          publicModelId: route.publicModel,
+          requestId: context.requestId,
+          routeId: context.routeId ?? route.id,
+          role: "orchestrator",
+          messages: request.messages,
+          system: buildFinalSynthesisSystemPrompt(route),
+          clientTools: context.clientTools,
+          toolResults:
+            planning.preFinalToolResults.length > 0
+              ? planning.preFinalToolResults
+              : undefined,
+          streamFinalOnly: context.streamFinalOnly ?? route.streamFinalOnly,
+          timeoutMs: synthesisTimeoutMs,
+        }),
+        deadline,
+        route,
+      )) {
         if (chunk.content !== "") {
           yield {
             content: chunk.content,
@@ -382,18 +386,22 @@ export class OrchestrationService {
     );
 
     try {
-      for await (const chunk of this.generation.stream({
-        modelId: targetModel,
-        publicModelId: request.model,
-        requestId: context.requestId,
-        routeId: context.routeId ?? route.id,
-        role: "delegate",
-        messages: buildDelegateMessages(toolCall),
-        system: toolCall.arguments.output_contract,
-        toolResults: toolResults.length > 0 ? toolResults : undefined,
-        streamFinalOnly: route.streamFinalOnly,
-        timeoutMs: delegateTimeoutMs,
-      })) {
+      for await (const chunk of streamWithDeadline(
+        this.generation.stream({
+          modelId: targetModel,
+          publicModelId: request.model,
+          requestId: context.requestId,
+          routeId: context.routeId ?? route.id,
+          role: "delegate",
+          messages: buildDelegateMessages(toolCall),
+          system: toolCall.arguments.output_contract,
+          toolResults: toolResults.length > 0 ? toolResults : undefined,
+          streamFinalOnly: route.streamFinalOnly,
+          timeoutMs: delegateTimeoutMs,
+        }),
+        Date.now() + delegateTimeoutMs,
+        route,
+      )) {
         if (chunk.content !== "") {
           yield {
             content: chunk.content,
@@ -563,37 +571,17 @@ export class OrchestrationService {
       parallelBatchCount += 1;
       maxParallelTasks = Math.max(maxParallelTasks, ready.length);
 
-      const batchResults = await Promise.all(
-        ready.map((task) =>
-          this.executeDelegateCall(
-            request,
-            context,
-            route,
-            task.toolCall,
-            deadline,
-            task.dependencies.length > 0
-              ? task.dependencies.map((dependency) => {
-                  const dependencyResult = resultByTaskId.get(dependency);
-                  if (!dependencyResult) {
-                    throw OpenAiHttpError.providerError(
-                      `Execution graph dependency '${dependency}' was not available for task '${task.id}'.`,
-                    );
-                  }
-
-                  return dependencyResult;
-                })
-              : undefined,
-          ),
-        ),
+      const batchResults = await this.executeReadyPreFinalBatch(
+        request,
+        context,
+        route,
+        ready,
+        deadline,
+        resultByTaskId,
       );
 
       ready.forEach((task, index) => {
         const result = batchResults[index];
-        if (result.status !== "success") {
-          throw OpenAiHttpError.providerError(
-            `Pre-final agent task '${task.id}' failed before final streaming.`,
-          );
-        }
         completed.add(task.id);
         pending.delete(task.id);
         resultByTaskId.set(task.id, result);
@@ -606,6 +594,53 @@ export class OrchestrationService {
       parallelBatchCount,
       maxParallelTasks,
     });
+
+    return results;
+  }
+
+  private async executeReadyPreFinalBatch(
+    request: ChatCompletionRequest,
+    context: OrchestrationRunContext,
+    route: RouteConfig,
+    tasks: InternalAgentTask[],
+    deadline: number,
+    resultByTaskId: Map<string, DelegateToolResult>,
+  ): Promise<DelegateToolResult[]> {
+    const pending = tasks.map((task, index) => ({
+      index,
+      task,
+      promise: this.executeDelegateCall(
+        request,
+        context,
+        route,
+        task.toolCall,
+        deadline,
+        buildDependencyToolResults(task, resultByTaskId),
+      ).then(
+        (result) => ({ index, result }),
+        (error: unknown) => ({ index, error }),
+      ),
+    }));
+    const results = new Array<DelegateToolResult>(tasks.length);
+
+    while (pending.length > 0) {
+      const completed = await Promise.race(pending.map((item) => item.promise));
+      const pendingIndex = pending.findIndex(
+        (item) => item.index === completed.index,
+      );
+      const [finished] = pending.splice(pendingIndex, 1);
+
+      if ("error" in completed) {
+        throw completed.error;
+      }
+      if (completed.result.status !== "success") {
+        throw OpenAiHttpError.providerError(
+          `Pre-final agent task '${finished.task.id}' failed before final streaming.`,
+        );
+      }
+
+      results[completed.index] = completed.result;
+    }
 
     return results;
   }
@@ -848,6 +883,26 @@ function buildDelegateMessages(
   }
 
   return [{ role: "user", content: toolCall.arguments.task }];
+}
+
+function buildDependencyToolResults(
+  task: InternalAgentTask,
+  resultByTaskId: Map<string, DelegateToolResult>,
+): DelegateToolResult[] | undefined {
+  if (task.dependencies.length === 0) {
+    return undefined;
+  }
+
+  return task.dependencies.map((dependency) => {
+    const dependencyResult = resultByTaskId.get(dependency);
+    if (!dependencyResult) {
+      throw OpenAiHttpError.providerError(
+        `Execution graph dependency '${dependency}' was not available for task '${task.id}'.`,
+      );
+    }
+
+    return dependencyResult;
+  });
 }
 
 function toFinalTargetLogFields(
@@ -1384,6 +1439,32 @@ function remainingMs(deadline: number, route: RouteConfig): number {
   }
 
   return remaining;
+}
+
+async function* streamWithDeadline<T>(
+  stream: AsyncIterable<T>,
+  deadline: number,
+  route: RouteConfig,
+): AsyncIterable<T> {
+  const iterator = stream[Symbol.asyncIterator]();
+
+  try {
+    while (true) {
+      const next = await withTimeout(
+        iterator.next(),
+        remainingMs(deadline, route),
+        `Route '${route.id}' timed out.`,
+      );
+      if (next.done) {
+        return;
+      }
+
+      yield next.value;
+    }
+  } catch (error) {
+    await iterator.return?.().catch(() => undefined);
+    throw error;
+  }
 }
 
 function withTimeout<T>(

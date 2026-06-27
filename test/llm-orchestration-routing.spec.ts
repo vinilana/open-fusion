@@ -165,6 +165,87 @@ class ParallelPreFinalGenerationPort implements LlmGenerationPort {
   }
 }
 
+class SlowFinalStreamGenerationPort implements LlmGenerationPort {
+  readonly requests: LlmGenerateRequest[] = [];
+  readonly streamRequests: LlmGenerateRequest[] = [];
+
+  async generate(request: LlmGenerateRequest): Promise<LlmGenerateResult> {
+    this.requests.push(request);
+    return {
+      content: "planning text must not be streamed",
+      finishReason: "stop",
+    };
+  }
+
+  async *stream(request: LlmGenerateRequest): AsyncIterable<LlmStreamChunk> {
+    this.streamRequests.push(request);
+    await delay(50);
+    yield {
+      content: "late chunk",
+      finishReason: null,
+    };
+    yield {
+      content: "",
+      finishReason: "stop",
+    };
+  }
+}
+
+class FailingParallelPreFinalGenerationPort implements LlmGenerationPort {
+  readonly requests: LlmGenerateRequest[] = [];
+
+  async generate(request: LlmGenerateRequest): Promise<LlmGenerateResult> {
+    this.requests.push(request);
+
+    if (request.role === "orchestrator") {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "call_fail",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.fast",
+              task: "fail fast",
+              task_id: "fail",
+              final: false,
+            },
+          },
+          {
+            id: "call_slow",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.fast",
+              task: "slow pending task",
+              task_id: "slow",
+              final: false,
+            },
+          },
+        ],
+      };
+    }
+
+    if (request.messages[0]?.content === "fail fast") {
+      throw OpenAiHttpError.providerError("Pre-final task failed.");
+    }
+
+    await delay(150);
+    return {
+      content: "slow result that should be ignored",
+      finishReason: "stop",
+    };
+  }
+
+  async *stream(): AsyncIterable<LlmStreamChunk> {
+    throw OpenAiHttpError.providerError("Final stream should not start.");
+    yield {
+      content: "",
+      finishReason: "stop",
+    };
+  }
+}
+
 describe("LLM orchestration routing", () => {
   it("calls the configured orchestrator for a direct response", async () => {
     const generation = new ScriptedGenerationPort([
@@ -1274,6 +1355,52 @@ describe("LLM orchestration routing", () => {
     ]);
   });
 
+  it("enforces the route timeout while waiting for final stream chunks", async () => {
+    const generation = new SlowFinalStreamGenerationPort();
+    const service = new OrchestrationService(
+      createShortTotalTimeoutConfigService(),
+      generation,
+    );
+
+    await expect(async () => {
+      for await (const chunk of service.streamFinal(
+        createRequest(routeModel, "hello"),
+        createRuntimeContext(),
+      )) {
+        void chunk;
+      }
+    }).rejects.toMatchObject({
+      status: 408,
+      code: "timeout",
+    });
+    expect(generation.requests.map((request) => request.modelId)).toEqual([
+      "orchestrator.default",
+    ]);
+    expect(generation.streamRequests.map((request) => request.modelId)).toEqual(
+      ["worker.fast"],
+    );
+  });
+
+  it("stops waiting for pending parallel pre-final tasks after a terminal failure", async () => {
+    const generation = new FailingParallelPreFinalGenerationPort();
+    const service = new OrchestrationService(createConfigService(), generation);
+    const startedAt = Date.now();
+
+    await expect(async () => {
+      for await (const chunk of service.streamFinal(
+        createRequest(routeModel, "hello"),
+        createRuntimeContext(),
+      )) {
+        void chunk;
+      }
+    }).rejects.toMatchObject({
+      status: 502,
+      code: "provider_error",
+    });
+
+    expect(Date.now() - startedAt).toBeLessThan(100);
+  });
+
   it("logs orchestration phases with requestId without prompts or responses", async () => {
     const generation = new ScriptedGenerationPort(
       [
@@ -1597,6 +1724,17 @@ function createMaxDelegationsConfigService(
 ): GatewayConfigService {
   const config = minimalConfig();
   config.routes.default.maxDelegations = maxDelegations;
+
+  return new GatewayConfigService({
+    rawConfig: config,
+    env: validEnv(),
+  });
+}
+
+function createShortTotalTimeoutConfigService(): GatewayConfigService {
+  const config = minimalConfig();
+  config.routes.default.timeoutMs = 10;
+  config.routes.default.delegateTimeoutMs = 10;
 
   return new GatewayConfigService({
     rawConfig: config,
