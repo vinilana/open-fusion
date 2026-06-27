@@ -53,6 +53,9 @@
       "maxDepth": 1,
       "timeoutMs": 60000,
       "delegateTimeoutMs": 30000,
+      "maxMessages": 128,
+      "maxMessageContentLength": 32768,
+      "maxPayloadBytes": 1048576,
       "streamFinalOnly": true,
       "allowClientTools": false
     }

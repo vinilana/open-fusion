@@ -45,7 +45,7 @@ describe("OpenAI-compatible API", () => {
   afterAll(async () => {
     await app?.close();
     cleanupConfig?.();
-    process.env = previousEnv;
+    restoreProcessEnv(previousEnv);
   });
 
   it("rejects unauthenticated /v1 requests with an OpenAI-compatible error", async () => {
@@ -122,6 +122,40 @@ describe("OpenAI-compatible API", () => {
         code: "invalid_request",
       },
     });
+  });
+
+  it("logs validation failures that happen before route context is available", async () => {
+    const logSpy = jest
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    try {
+      await request(app.getHttpServer())
+        .post("/v1/chat/completions")
+        .set("Authorization", "Bearer test-gateway-key")
+        .set("x-request-id", "req-validation-log")
+        .send({
+          model: "route/default",
+          stream: true,
+          messages: "invalid",
+        })
+        .expect(400);
+
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining('"event":"chat_completion.failed"'),
+      );
+      const serializedLogs = logSpy.mock.calls.flat().join("\n");
+      expect(serializedLogs).toContain('"requestId":"req-validation-log"');
+      expect(serializedLogs).toContain('"clientId":"local-dev"');
+      expect(serializedLogs).toContain('"publicModel":"route/default"');
+      expect(serializedLogs).toContain('"stream":true');
+      expect(serializedLogs).toContain('"status":"error"');
+      expect(serializedLogs).toContain('"type":"invalid_request_error"');
+      expect(serializedLogs).toContain('"code":"invalid_request"');
+      expect(serializedLogs).toContain('"param":"messages"');
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 
   it("returns 403 when the client cannot access the requested model", async () => {
@@ -553,9 +587,18 @@ async function createAppWithGenerationPort(
     async close() {
       await app.close();
       config.cleanup();
-      process.env = previousEnv;
+      restoreProcessEnv(previousEnv);
     },
   };
+}
+
+function restoreProcessEnv(previousEnv: NodeJS.ProcessEnv): void {
+  Object.keys(process.env).forEach((key) => {
+    if (!(key in previousEnv)) {
+      delete process.env[key];
+    }
+  });
+  Object.assign(process.env, previousEnv);
 }
 
 class FailingBeforeFirstChunkGenerationPort implements LlmGenerationPort {

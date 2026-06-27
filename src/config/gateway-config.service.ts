@@ -49,6 +49,9 @@ export interface RawGatewayConfig {
       delegateTimeoutMs: number;
       streamFinalOnly: boolean;
       allowClientTools?: boolean;
+      maxMessages?: number;
+      maxMessageContentLength?: number;
+      maxPayloadBytes?: number;
     }
   >;
   observability?: {
@@ -99,6 +102,9 @@ export interface RouteConfig {
   delegateTimeoutMs: number;
   streamFinalOnly: boolean;
   allowClientTools: boolean;
+  maxMessages: number;
+  maxMessageContentLength: number;
+  maxPayloadBytes: number;
 }
 
 export interface ModelAccessPolicy {
@@ -113,6 +119,10 @@ export interface GatewayConfigServiceOptions {
 }
 
 export const GATEWAY_CONFIG_OPTIONS = "GATEWAY_CONFIG_OPTIONS";
+
+const DEFAULT_MAX_MESSAGES = 128;
+const DEFAULT_MAX_MESSAGE_CONTENT_LENGTH = 32768;
+const DEFAULT_MAX_PAYLOAD_BYTES = 1048576;
 
 interface RuntimeGatewayConfig {
   server: {
@@ -515,6 +525,21 @@ function validateRoutes(
       route.delegateTimeoutMs,
       `routes.${id}.delegateTimeoutMs`,
     );
+    const maxMessages = validateOptionalPositiveInteger(
+      route.maxMessages,
+      `routes.${id}.maxMessages`,
+      DEFAULT_MAX_MESSAGES,
+    );
+    const maxMessageContentLength = validateOptionalPositiveInteger(
+      route.maxMessageContentLength,
+      `routes.${id}.maxMessageContentLength`,
+      DEFAULT_MAX_MESSAGE_CONTENT_LENGTH,
+    );
+    const maxPayloadBytes = validateOptionalPositiveInteger(
+      route.maxPayloadBytes,
+      `routes.${id}.maxPayloadBytes`,
+      DEFAULT_MAX_PAYLOAD_BYTES,
+    );
     if (route.maxDepth !== 1) {
       throw new GatewayConfigError(
         `routes.${id}.maxDepth`,
@@ -572,6 +597,9 @@ function validateRoutes(
       delegateTimeoutMs: route.delegateTimeoutMs,
       streamFinalOnly: route.streamFinalOnly,
       allowClientTools: route.allowClientTools === true,
+      maxMessages,
+      maxMessageContentLength,
+      maxPayloadBytes,
     };
   });
 }
@@ -641,6 +669,19 @@ function validatePositiveInteger(value: unknown, path: string): void {
   if (!Number.isInteger(value) || Number(value) <= 0) {
     throw new GatewayConfigError(path, "must be a positive integer");
   }
+}
+
+function validateOptionalPositiveInteger(
+  value: unknown,
+  path: string,
+  defaultValue: number,
+): number {
+  if (value === undefined) {
+    return defaultValue;
+  }
+
+  validatePositiveInteger(value, path);
+  return Number(value);
 }
 
 function validateStringArray(value: unknown, path: string): string[] {

@@ -42,6 +42,7 @@ export interface OpenRouterGenerateTextOptions {
   messages: ModelMessage[];
   system?: string;
   timeout: number;
+  abortSignal?: AbortSignal;
   tools?: ToolSet;
   providerOptions: {
     openrouter: Record<string, unknown>;
@@ -130,6 +131,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
         messages: prompt.messages,
         system: prompt.system,
         timeout: request.timeoutMs,
+        abortSignal: request.abortSignal,
         ...toInternalToolsOption(request),
         providerOptions: {
           openrouter: provider.providerOptions,
@@ -166,6 +168,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
         messages: prompt.messages,
         system: prompt.system,
         timeout: request.timeoutMs,
+        abortSignal: request.abortSignal,
         providerOptions: {
           openrouter: provider.providerOptions,
         },
@@ -384,44 +387,107 @@ function toDelegateToolCalls(
       return [];
     }
 
+    const args: DelegateLlmToolCall["arguments"] = {
+      target_model: toolCall.input.target_model,
+      task: toolCall.input.task,
+    };
+    const messages = toValidChatCompletionMessages(toolCall.input.messages);
+    if (messages !== undefined) {
+      args.messages = messages;
+    }
+    if (typeof toolCall.input.output_contract === "string") {
+      args.output_contract = toolCall.input.output_contract;
+    }
+    if (typeof toolCall.input.reason === "string") {
+      args.reason = toolCall.input.reason;
+    }
+    if (typeof toolCall.input.task_id === "string") {
+      args.task_id = toolCall.input.task_id;
+    }
+    const dependencies = toStringArray(toolCall.input.depends_on);
+    if (dependencies !== undefined && dependencies.length > 0) {
+      args.depends_on = dependencies;
+    }
+    if (typeof toolCall.input.final === "boolean") {
+      args.final = toolCall.input.final;
+    }
+
     return [
       {
         id: toolCall.toolCallId ?? "delegate_llm",
         name: "delegate_llm" as const,
-        arguments: {
-          target_model: toolCall.input.target_model,
-          task: toolCall.input.task,
-          messages: Array.isArray(toolCall.input.messages)
-            ? (toolCall.input.messages as ChatCompletionMessage[])
-            : undefined,
-          output_contract:
-            typeof toolCall.input.output_contract === "string"
-              ? toolCall.input.output_contract
-              : undefined,
-          reason:
-            typeof toolCall.input.reason === "string"
-              ? toolCall.input.reason
-              : undefined,
-          task_id:
-            typeof toolCall.input.task_id === "string"
-              ? toolCall.input.task_id
-              : undefined,
-          depends_on: Array.isArray(toolCall.input.depends_on)
-            ? toolCall.input.depends_on.filter(
-                (dependency): dependency is string =>
-                  typeof dependency === "string",
-              )
-            : undefined,
-          final:
-            typeof toolCall.input.final === "boolean"
-              ? toolCall.input.final
-              : undefined,
-        },
+        arguments: args,
       },
     ];
   });
 
   return mapped.length > 0 ? mapped : undefined;
+}
+
+function toValidChatCompletionMessages(
+  value: unknown,
+): ChatCompletionMessage[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const messages: ChatCompletionMessage[] = [];
+  for (const item of value) {
+    const message = toValidChatCompletionMessage(item);
+    if (!message) {
+      return undefined;
+    }
+    messages.push(message);
+  }
+
+  return messages;
+}
+
+function toValidChatCompletionMessage(
+  value: unknown,
+): ChatCompletionMessage | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  if (!["system", "user", "assistant", "tool"].includes(String(value.role))) {
+    return undefined;
+  }
+  if (
+    "content" in value &&
+    value.content !== null &&
+    typeof value.content !== "string"
+  ) {
+    return undefined;
+  }
+  if ("name" in value && typeof value.name !== "string") {
+    return undefined;
+  }
+  if ("tool_call_id" in value && typeof value.tool_call_id !== "string") {
+    return undefined;
+  }
+
+  const message: ChatCompletionMessage = {
+    role: value.role as ChatCompletionMessage["role"],
+  };
+  if ("content" in value) {
+    message.content = value.content as string | null;
+  }
+  if (typeof value.name === "string") {
+    message.name = value.name;
+  }
+  if (typeof value.tool_call_id === "string") {
+    message.tool_call_id = value.tool_call_id;
+  }
+
+  return message;
+}
+
+function toStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  return value.filter((item): item is string => typeof item === "string");
 }
 
 function toUsage(usage: OpenRouterUsage | undefined): LlmUsage {

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { Injectable } from "@nestjs/common";
 
+import { AuthenticatedClient } from "../auth/authenticated-client";
 import {
   GatewayConfigService,
   RouteConfig,
@@ -14,11 +15,6 @@ import {
   ChatCompletionRequest,
   ChatCompletionResponse,
 } from "./openai-types";
-
-interface AuthenticatedClient {
-  id: string;
-  allowedModels: string[];
-}
 
 export interface ChatCompletionRequestContext {
   requestId: string;
@@ -44,6 +40,7 @@ export class ChatCompletionsService {
   ): ChatCompletionRequestContext {
     const request = this.validate(body);
     const route = this.assertModelAccess(request.model, client);
+    this.assertRequestLimits(body, request, route);
     this.assertClientToolsAllowed(request, route);
 
     return {
@@ -284,6 +281,12 @@ export class ChatCompletionsService {
     if (field in body && typeof body[field] !== "number") {
       throw OpenAiHttpError.invalidRequest(`${field} must be a number.`, field);
     }
+    if (typeof body[field] === "number" && !Number.isFinite(body[field])) {
+      throw OpenAiHttpError.invalidRequest(
+        `${field} must be a finite number.`,
+        field,
+      );
+    }
   }
 
   private validateClientTools(tools: unknown[]): void {
@@ -353,6 +356,39 @@ export class ChatCompletionsService {
       throw OpenAiHttpError.invalidRequest(
         `Client tools are not enabled for route '${route.id}'.`,
         "tools",
+      );
+    }
+  }
+
+  private assertRequestLimits(
+    body: unknown,
+    request: ChatCompletionRequest,
+    route: RouteConfig,
+  ): void {
+    if (request.messages.length > route.maxMessages) {
+      throw OpenAiHttpError.rateLimited(
+        `messages exceeds the configured limit of ${route.maxMessages}.`,
+        "messages",
+      );
+    }
+
+    for (const [index, message] of request.messages.entries()) {
+      const content = message.content;
+      if (
+        typeof content === "string" &&
+        content.length > route.maxMessageContentLength
+      ) {
+        throw OpenAiHttpError.rateLimited(
+          `messages[${index}].content exceeds the configured limit of ${route.maxMessageContentLength} characters.`,
+          "messages",
+        );
+      }
+    }
+
+    const payloadBytes = Buffer.byteLength(JSON.stringify(body), "utf8");
+    if (payloadBytes > route.maxPayloadBytes) {
+      throw OpenAiHttpError.rateLimited(
+        `Request payload exceeds the configured limit of ${route.maxPayloadBytes} bytes.`,
       );
     }
   }

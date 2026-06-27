@@ -83,6 +83,9 @@ Se ausente, o backend pode tentar `./config/open-fusion.config.json`.
       "maxDepth": 1,
       "timeoutMs": 60000,
       "delegateTimeoutMs": 30000,
+      "maxMessages": 128,
+      "maxMessageContentLength": 32768,
+      "maxPayloadBytes": 1048576,
       "streamFinalOnly": true
     }
   },
@@ -101,6 +104,7 @@ Se ausente, o backend pode tentar `./config/open-fusion.config.json`.
 - Cada rota deve referenciar um orquestrador existente.
 - `allowedDelegateModels` deve conter apenas modelos existentes com role `delegate`.
 - `maxDepth` deve ser `1` no MVP.
+- limites de payload, quantidade de mensagens e tamanho de conteudo devem ser inteiros positivos quando configurados.
 - Segredos resolvidos por `*Env` devem existir no ambiente, salvo em modo de validacao permissivo local.
 
 ## Resolucao de segredos
@@ -126,4 +130,3 @@ Versoes futuras podem adicionar:
 ## ADRs relacionados
 
 - [ADR 0004](../adrs/0004-single-json-configuration.md)
-

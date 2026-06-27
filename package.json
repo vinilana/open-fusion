@@ -4,6 +4,9 @@
   "private": true,
   "description": "OpenAI-compatible LLM gateway built with NestJS.",
   "license": "UNLICENSED",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "format": "prettier --check \"{src,test}/**/*.ts\" \"*.json\" \"config/**/*.json\"",

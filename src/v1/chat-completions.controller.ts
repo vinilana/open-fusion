@@ -27,17 +27,18 @@ export class ChatCompletionsController {
       throw OpenAiHttpError.authentication();
     }
 
-    const context = this.completions.createRequestContext(
-      body,
-      client,
-      request.requestId ?? "",
-    );
-
     const startedAt = Date.now();
 
+    let context: ChatCompletionRequestContext | undefined;
     let sseStarted = false;
 
     try {
+      context = this.completions.createRequestContext(
+        body,
+        client,
+        request.requestId ?? "",
+      );
+
       if (context.stream) {
         for await (const chunk of this.completions.streamRequest(context)) {
           const event = `data: ${JSON.stringify(chunk)}\n\n`;
@@ -60,8 +61,17 @@ export class ChatCompletionsController {
       this.logSuccess(context, client.id, startedAt, completion);
       response.status(200).json(completion);
     } catch (error) {
-      this.logFailure(context, client.id, startedAt, error);
-      if (context.stream && (sseStarted || response.headersSent)) {
+      this.logFailure(
+        context,
+        body,
+        client.id,
+        request.requestId ?? "",
+        startedAt,
+        error,
+      );
+      const isStreamFailure =
+        context?.stream ?? this.completions.isStreamingRequest(body);
+      if (isStreamFailure && (sseStarted || response.headersSent)) {
         if (!response.writableEnded) {
           response.end("data: [DONE]\n\n");
         }
@@ -99,19 +109,21 @@ export class ChatCompletionsController {
   }
 
   private logFailure(
-    context: ChatCompletionRequestContext,
+    context: ChatCompletionRequestContext | undefined,
+    body: unknown,
     clientId: string,
+    requestId: string,
     startedAt: number,
     error: unknown,
   ): void {
     this.operationalLogger.logChatCompletion({
       event: "chat_completion.failed",
-      requestId: context.requestId,
+      requestId: context?.requestId ?? requestId,
       clientId,
-      routeId: context.routeId,
-      publicModel: context.publicModel,
-      orchestrator: context.orchestrator,
-      stream: context.stream,
+      routeId: context?.routeId ?? "",
+      publicModel: context?.publicModel ?? getRequestedModel(body),
+      orchestrator: context?.orchestrator ?? "",
+      stream: context?.stream ?? this.completions.isStreamingRequest(body),
       status: "error",
       latencyMs: elapsedMs(startedAt),
       error: this.operationalLogger.normalizeError(error),
@@ -121,4 +133,17 @@ export class ChatCompletionsController {
 
 function elapsedMs(startedAt: number): number {
   return Math.max(0, Date.now() - startedAt);
+}
+
+function getRequestedModel(body: unknown): string {
+  if (
+    typeof body === "object" &&
+    body !== null &&
+    "model" in body &&
+    typeof (body as { model?: unknown }).model === "string"
+  ) {
+    return (body as { model: string }).model;
+  }
+
+  return "";
 }
