@@ -4,14 +4,20 @@ import request from "supertest";
 
 import { AppModule } from "../src/app.module";
 import { OpenAiHttpError } from "../src/errors/openai-http-error";
+import { RawGatewayConfig } from "../src/config/gateway-config.service";
 import {
   LLM_GENERATION_PORT,
+  LlmGenerateRequest,
   LlmGenerateResult,
   LlmGenerationPort,
   LlmStreamChunk,
 } from "../src/orchestration/llm-generation.port";
 import { StubLlmGenerationPort } from "../src/orchestration/stub-llm-generation.port";
-import { validEnv, writeConfig } from "./support/gateway-config.fixture";
+import {
+  minimalConfig,
+  validEnv,
+  writeConfig,
+} from "./support/gateway-config.fixture";
 
 describe("OpenAI-compatible API", () => {
   let app: INestApplication;
@@ -324,6 +330,67 @@ describe("OpenAI-compatible API", () => {
     expect(response.text.trim().endsWith("data: [DONE]")).toBe(true);
   });
 
+  it("streams delegated model output when the orchestrator routes a streaming request", async () => {
+    const delegatedApp = await createAppWithGenerationPort(
+      DelegatingStreamGenerationPort,
+    );
+
+    try {
+      const response = await request(delegatedApp.app.getHttpServer())
+        .post("/v1/chat/completions")
+        .set("Authorization", "Bearer test-gateway-key")
+        .send({
+          model: "route/default",
+          stream: true,
+          messages: [{ role: "user", content: "route this request" }],
+        })
+        .expect(200);
+
+      expect(response.headers["content-type"]).toContain("text/event-stream");
+      expect(accumulateStreamContent(response.text)).toBe(
+        "delegated streamed answer",
+      );
+      expect(response.text).not.toContain("delegate_llm");
+      expect(response.text.trim().endsWith("data: [DONE]")).toBe(true);
+    } finally {
+      await delegatedApp.close();
+    }
+  });
+
+  it("routes coding streaming requests to the coding-capable delegate even when the orchestrator answers directly", async () => {
+    const codingConfig = minimalConfig();
+    codingConfig.models["worker.fast"].capabilities = ["coding"];
+    const delegatedApp = await createAppWithGenerationPort(
+      CodingFallbackGenerationPort,
+      codingConfig,
+    );
+
+    try {
+      const response = await request(delegatedApp.app.getHttpServer())
+        .post("/v1/chat/completions")
+        .set("Authorization", "Bearer test-gateway-key")
+        .send({
+          model: "route/default",
+          stream: true,
+          messages: [
+            {
+              role: "user",
+              content: "faça um codigo python para printar hello world",
+            },
+          ],
+        })
+        .expect(200);
+
+      expect(response.headers["content-type"]).toContain("text/event-stream");
+      expect(accumulateStreamContent(response.text)).toBe(
+        "print('hello world')",
+      );
+      expect(response.text.trim().endsWith("data: [DONE]")).toBe(true);
+    } finally {
+      await delegatedApp.close();
+    }
+  });
+
   it("returns a JSON error before opening SSE when streaming orchestration fails before the first chunk", async () => {
     const failingApp = await createAppWithGenerationPort(
       FailingBeforeFirstChunkGenerationPort,
@@ -432,9 +499,10 @@ describe("OpenAI-compatible API", () => {
 
 async function createAppWithGenerationPort(
   generationPort: new () => LlmGenerationPort,
+  rawConfig: RawGatewayConfig = minimalConfig(),
 ): Promise<{ app: INestApplication; close: () => Promise<void> }> {
   const previousEnv = { ...process.env };
-  const config = writeConfig();
+  const config = writeConfig(rawConfig);
   process.env.OPEN_FUSION_CONFIG = config.path;
   Object.assign(process.env, validEnv());
 
@@ -472,6 +540,88 @@ class FailingBeforeFirstChunkGenerationPort implements LlmGenerationPort {
     yield {
       content: "",
       finishReason: "stop",
+    };
+  }
+}
+
+class DelegatingStreamGenerationPort implements LlmGenerationPort {
+  async generate(): Promise<LlmGenerateResult> {
+    return {
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [
+        {
+          id: "call_1",
+          name: "delegate_llm",
+          arguments: {
+            target_model: "worker.fast",
+            task: "produce the final streamed answer",
+          },
+        },
+      ],
+      usage: {
+        promptTokens: 1,
+        completionTokens: 2,
+        totalTokens: 3,
+      },
+    };
+  }
+
+  async *stream(request: LlmGenerateRequest): AsyncIterable<LlmStreamChunk> {
+    if (request.modelId !== "worker.fast") {
+      throw OpenAiHttpError.providerError("Expected delegate stream.");
+    }
+
+    yield {
+      content: "delegated ",
+      finishReason: null,
+    };
+    yield {
+      content: "streamed answer",
+      finishReason: null,
+    };
+    yield {
+      content: "",
+      finishReason: "stop",
+      usage: {
+        promptTokens: 4,
+        completionTokens: 5,
+        totalTokens: 9,
+      },
+    };
+  }
+}
+
+class CodingFallbackGenerationPort implements LlmGenerationPort {
+  async generate(): Promise<LlmGenerateResult> {
+    return {
+      content: "orchestrator direct answer must not be streamed",
+      finishReason: "stop",
+      usage: {
+        promptTokens: 1,
+        completionTokens: 2,
+        totalTokens: 3,
+      },
+    };
+  }
+
+  async *stream(request: LlmGenerateRequest): AsyncIterable<LlmStreamChunk> {
+    if (request.modelId !== "worker.fast") {
+      throw OpenAiHttpError.providerError("Expected coding delegate stream.");
+    }
+
+    yield {
+      content: "print('hello world')",
+      finishReason: null,
+    };
+    yield {
+      content: "",
+      finishReason: "stop",
+      usage: {
+        promptTokens: 4,
+        completionTokens: 5,
+        totalTokens: 9,
+      },
     };
   }
 }

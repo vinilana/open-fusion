@@ -605,7 +605,7 @@ describe("LLM orchestration routing", () => {
     ]);
   });
 
-  it("runs delegation planning before streaming only the final synthesis", async () => {
+  it("streams the selected delegate directly after router planning", async () => {
     const generation = new ScriptedGenerationPort(
       [
         {
@@ -618,21 +618,18 @@ describe("LLM orchestration routing", () => {
               arguments: {
                 target_model: "worker.fast",
                 task: "draft a streamable answer",
+                output_contract: "Answer directly to the client.",
               },
             },
           ],
         },
+      ],
+      [
         {
-          content: "delegate draft",
-          finishReason: "stop",
+          chunks: ["delegate ", "streamed ", "answer"],
           usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 },
         },
-        {
-          content: "ready for final stream",
-          finishReason: "stop",
-        },
       ],
-      [["final ", "streamed ", "answer"]],
     );
     const service = new OrchestrationService(createConfigService(), generation);
 
@@ -648,39 +645,25 @@ describe("LLM orchestration routing", () => {
     }
 
     expect(chunks).toEqual([
-      { content: "final ", finishReason: null },
+      { content: "delegate ", finishReason: null },
       { content: "streamed ", finishReason: null },
       { content: "answer", finishReason: null },
       { content: "", finishReason: "stop" },
     ]);
     expect(generation.requests.map((request) => request.modelId)).toEqual([
       "orchestrator.default",
-      "worker.fast",
-      "orchestrator.default",
     ]);
     expect(generation.streamRequests.map((request) => request.modelId)).toEqual(
-      ["orchestrator.default"],
+      ["worker.fast"],
     );
     expect(generation.requests[0].internalTools).toEqual(["delegate_llm"]);
-    expect(generation.requests[2].toolResults).toEqual([
-      expect.objectContaining({
-        targetModel: "worker.fast",
-        task: "draft a streamable answer",
-        status: "success",
-        content: "delegate draft",
-        untrusted: true,
-      }),
-    ]);
+    expect(generation.streamRequests[0]).toMatchObject({
+      role: "delegate",
+      messages: [{ role: "user", content: "draft a streamable answer" }],
+      system: "Answer directly to the client.",
+    });
     expect(generation.streamRequests[0].internalTools).toBeUndefined();
-    expect(generation.streamRequests[0].toolResults).toEqual([
-      expect.objectContaining({
-        targetModel: "worker.fast",
-        task: "draft a streamable answer",
-        status: "success",
-        content: "delegate draft",
-        untrusted: true,
-      }),
-    ]);
+    expect(generation.streamRequests[0].toolResults).toBeUndefined();
   });
 
   it("uses the final stream for direct streaming responses without delegation", async () => {
@@ -716,6 +699,54 @@ describe("LLM orchestration routing", () => {
       ["orchestrator.default"],
     );
     expect(generation.streamRequests[0].internalTools).toBeUndefined();
+  });
+
+  it("routes coding streaming requests to a coding-capable delegate when the orchestrator answers directly", async () => {
+    const generation = new ScriptedGenerationPort(
+      [
+        {
+          content: "orchestrator direct code should not be streamed",
+          finishReason: "stop",
+        },
+      ],
+      [["print('hello world')"]],
+    );
+    const service = new OrchestrationService(
+      createCodingConfigService(),
+      generation,
+    );
+
+    const chunks = [];
+    for await (const chunk of service.streamFinal(
+      createRequest(
+        routeModel,
+        "faça um codigo python para printar hello world",
+      ),
+      createRuntimeContext(),
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { content: "print('hello world')", finishReason: null },
+      { content: "", finishReason: "stop" },
+    ]);
+    expect(generation.requests.map((request) => request.modelId)).toEqual([
+      "orchestrator.default",
+    ]);
+    expect(generation.streamRequests.map((request) => request.modelId)).toEqual(
+      ["worker.fast"],
+    );
+    expect(generation.streamRequests[0]).toMatchObject({
+      role: "delegate",
+      messages: [
+        {
+          role: "user",
+          content: "faça um codigo python para printar hello world",
+        },
+      ],
+      system: expect.stringContaining("coding"),
+    });
   });
 
   it("propagates the final stream finish reason", async () => {
@@ -768,20 +799,11 @@ describe("LLM orchestration routing", () => {
           ],
           usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 },
         },
-        {
-          content: "delegate response must not be logged",
-          finishReason: "stop",
-          usage: { promptTokens: 4, completionTokens: 5, totalTokens: 9 },
-        },
-        {
-          content: "ready",
-          finishReason: "stop",
-        },
       ],
       [
         {
-          chunks: ["final response must not be logged"],
-          usage: { promptTokens: 6, completionTokens: 7, totalTokens: 13 },
+          chunks: ["delegate response must not be logged"],
+          usage: { promptTokens: 4, completionTokens: 5, totalTokens: 9 },
         },
       ],
     );
@@ -818,17 +840,10 @@ describe("LLM orchestration routing", () => {
           requestId: "req-orchestration-test",
           internalModel: "worker.fast",
           status: "success",
-        }),
-        expect.objectContaining({
-          event: "llm_invocation.completed",
-          phase: "final_synthesis",
-          requestId: "req-orchestration-test",
-          internalModel: "orchestrator.default",
-          status: "success",
           usage: {
-            prompt_tokens: 6,
-            completion_tokens: 7,
-            total_tokens: 13,
+            prompt_tokens: 4,
+            completion_tokens: 5,
+            total_tokens: 9,
           },
         }),
       ]),
@@ -838,10 +853,9 @@ describe("LLM orchestration routing", () => {
     expect(serializedEvents).not.toContain(
       "delegate response must not be logged",
     );
-    expect(serializedEvents).not.toContain("final response must not be logged");
   });
 
-  it("repeats streaming planning until delegations are complete before final synthesis", async () => {
+  it("rejects multiple streaming delegate targets before opening the delegate stream", async () => {
     const generation = new ScriptedGenerationPort(
       [
         {
@@ -856,16 +870,6 @@ describe("LLM orchestration routing", () => {
                 task: "first draft",
               },
             },
-          ],
-        },
-        {
-          content: "first delegate",
-          finishReason: "stop",
-        },
-        {
-          content: "",
-          finishReason: "tool_calls",
-          toolCalls: [
             {
               id: "call_2",
               name: "delegate_llm",
@@ -876,67 +880,26 @@ describe("LLM orchestration routing", () => {
             },
           ],
         },
-        {
-          content: "second delegate",
-          finishReason: "stop",
-        },
-        {
-          content: "ready for final stream",
-          finishReason: "stop",
-        },
       ],
-      [["final answer"]],
+      [["should not stream"]],
     );
     const service = new OrchestrationService(createConfigService(), generation);
 
-    const chunks = [];
-    for await (const chunk of service.streamFinal(
-      createRequest(routeModel, "hello"),
-      createRuntimeContext(),
-    )) {
-      chunks.push(chunk);
-    }
-
-    expect(chunks).toEqual([
-      { content: "final answer", finishReason: null },
-      { content: "", finishReason: "stop" },
-    ]);
+    await expect(async () => {
+      for await (const chunk of service.streamFinal(
+        createRequest(routeModel, "hello"),
+        createRuntimeContext(),
+      )) {
+        void chunk;
+      }
+    }).rejects.toMatchObject({
+      status: 502,
+      code: "provider_error",
+    });
     expect(generation.requests.map((request) => request.modelId)).toEqual([
       "orchestrator.default",
-      "worker.fast",
-      "orchestrator.default",
-      "worker.fast",
-      "orchestrator.default",
     ]);
-    expect(generation.requests[2].toolResults).toEqual([
-      expect.objectContaining({
-        targetModel: "worker.fast",
-        task: "first draft",
-        status: "success",
-      }),
-    ]);
-    expect(generation.requests[4].toolResults).toEqual([
-      expect.objectContaining({
-        targetModel: "worker.fast",
-        task: "first draft",
-        status: "success",
-      }),
-      expect.objectContaining({
-        targetModel: "worker.fast",
-        task: "second draft",
-        status: "success",
-      }),
-    ]);
-    expect(generation.streamRequests[0].toolResults).toEqual([
-      expect.objectContaining({
-        targetModel: "worker.fast",
-        task: "first draft",
-      }),
-      expect.objectContaining({
-        targetModel: "worker.fast",
-        task: "second draft",
-      }),
-    ]);
+    expect(generation.streamRequests).toHaveLength(0);
   });
 });
 
@@ -959,6 +922,15 @@ function createRuntimeContext() {
 function createConfigService(): GatewayConfigService {
   return new GatewayConfigService({
     rawConfig: minimalConfig(),
+    env: validEnv(),
+  });
+}
+
+function createCodingConfigService(): GatewayConfigService {
+  const config = minimalConfig();
+  config.models["worker.fast"].capabilities = ["coding"];
+  return new GatewayConfigService({
+    rawConfig: config,
     env: validEnv(),
   });
 }
