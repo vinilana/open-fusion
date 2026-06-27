@@ -40,10 +40,21 @@
     },
     "worker.fast": {
       "provider": "openrouter",
-      "model": "moonshotai/kimi-k2.7-code",
+      "model": "google/gemini-3.5-flash",
       "role": "delegate",
       "capabilities": [
         "coding"
+      ],
+      "defaults": {
+        "temperature": 0.3
+      }
+    },
+    "worker.plan": {
+      "provider": "openrouter",
+      "model": "minimax/minimax-m3",
+      "role": "delegate",
+      "capabilities": [
+        "reasoning"
       ],
       "defaults": {
         "temperature": 0.3
