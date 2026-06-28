@@ -1,10 +1,12 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
+  generateObject,
   generateText,
   jsonSchema,
   streamText,
   tool,
+  type JSONSchema7,
   type ModelMessage,
   type ToolSet,
 } from "ai";
@@ -20,8 +22,13 @@ import {
   LlmFinishReason,
   LlmGenerateRequest,
   LlmGenerateResult,
+  LlmRoutingDecisionRequest,
   LlmStreamChunk,
   LlmUsage,
+  ROUTING_DECISION_JSON_SCHEMA,
+  RoutingDecision,
+  RoutingDecisionFinalTarget,
+  RoutingDecisionPreFinalTask,
 } from "../orchestration/llm-generation.port";
 import { ChatCompletionMessage } from "../v1/openai-types";
 import { ProviderAdapter } from "./provider-adapter";
@@ -52,6 +59,23 @@ export interface OpenRouterGenerateTextOptions {
   maxOutputTokens?: number;
 }
 
+export interface OpenRouterGenerateObjectOptions {
+  model: unknown;
+  messages: ModelMessage[];
+  system?: string;
+  schema: unknown;
+  schemaName: string;
+  schemaDescription: string;
+  timeout: number;
+  abortSignal?: AbortSignal;
+  providerOptions: {
+    openrouter: Record<string, unknown>;
+  };
+  temperature?: number;
+  topP?: number;
+  maxOutputTokens?: number;
+}
+
 export interface OpenRouterGenerateTextResult {
   text: string;
   finishReason: string;
@@ -61,6 +85,10 @@ export interface OpenRouterGenerateTextResult {
     toolName?: string;
     input?: unknown;
   }>;
+}
+
+export interface OpenRouterGenerateObjectResult {
+  object: RoutingDecision;
 }
 
 export interface OpenRouterUsage {
@@ -75,11 +103,24 @@ export interface OpenRouterStreamTextResult {
   totalUsage?: PromiseLike<OpenRouterUsage | undefined>;
 }
 
+type RoutingDecisionValidationResult =
+  | {
+      success: true;
+      value: RoutingDecision;
+    }
+  | {
+      success: false;
+      error: Error;
+    };
+
 export interface OpenRouterSdk {
   createOpenRouter(options: OpenRouterCreateOptions): OpenRouterProviderFactory;
   generateText(
     options: OpenRouterGenerateTextOptions,
   ): Promise<OpenRouterGenerateTextResult>;
+  generateObject(
+    options: OpenRouterGenerateObjectOptions,
+  ): Promise<OpenRouterGenerateObjectResult>;
   streamText(
     options: OpenRouterGenerateTextOptions,
   ): OpenRouterStreamTextResult;
@@ -95,6 +136,11 @@ const defaultOpenRouterSdk: OpenRouterSdk = {
     return generateText(
       options as unknown as Parameters<typeof generateText>[0],
     ) as Promise<OpenRouterGenerateTextResult>;
+  },
+  async generateObject(options) {
+    return generateObject(
+      options as unknown as Parameters<typeof generateObject>[0],
+    ) as Promise<OpenRouterGenerateObjectResult>;
   },
   streamText(options) {
     return streamText(
@@ -119,12 +165,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     request: LlmGenerateRequest,
   ): Promise<LlmGenerateResult> {
     try {
-      const openrouter = this.sdk.createOpenRouter({
-        apiKey: provider.apiKey,
-        baseURL: provider.baseUrl,
-        headers: provider.headers,
-        extraBody: provider.providerOptions,
-      });
+      const openrouter = createOpenRouterProviderFactory(this.sdk, provider);
       const prompt = toAiSdkPrompt(request);
       const result = await this.sdk.generateText({
         model: openrouter.chat(model.providerModel),
@@ -150,18 +191,48 @@ export class OpenRouterAdapter implements ProviderAdapter {
     }
   }
 
+  async generateRoutingDecision(
+    provider: ProviderConfig,
+    model: InternalModelConfig,
+    request: LlmRoutingDecisionRequest,
+  ): Promise<RoutingDecision> {
+    try {
+      const openrouter = createOpenRouterProviderFactory(this.sdk, provider);
+      const prompt = toAiSdkPrompt(request);
+      const result = await this.sdk.generateObject({
+        model: openrouter.chat(model.providerModel),
+        messages: prompt.messages,
+        system: prompt.system,
+        schema: jsonSchema<RoutingDecision>(
+          ROUTING_DECISION_JSON_SCHEMA as JSONSchema7,
+          {
+            validate: validateRoutingDecision,
+          },
+        ),
+        schemaName: "routing_decision",
+        schemaDescription:
+          "Structured routing decision for the allowed Open Fusion route catalog.",
+        timeout: request.timeoutMs,
+        abortSignal: request.abortSignal,
+        providerOptions: {
+          openrouter: provider.providerOptions,
+        },
+        ...toCallSettings(model.defaults),
+      });
+
+      return result.object;
+    } catch {
+      throw OpenAiHttpError.providerError();
+    }
+  }
+
   async *stream(
     provider: ProviderConfig,
     model: InternalModelConfig,
     request: LlmGenerateRequest,
   ): AsyncIterable<LlmStreamChunk> {
     try {
-      const openrouter = this.sdk.createOpenRouter({
-        apiKey: provider.apiKey,
-        baseURL: provider.baseUrl,
-        headers: provider.headers,
-        extraBody: provider.providerOptions,
-      });
+      const openrouter = createOpenRouterProviderFactory(this.sdk, provider);
       const prompt = toAiSdkPrompt(request);
       const result = this.sdk.streamText({
         model: openrouter.chat(model.providerModel),
@@ -191,6 +262,165 @@ export class OpenRouterAdapter implements ProviderAdapter {
       throw OpenAiHttpError.providerError();
     }
   }
+}
+
+function createOpenRouterProviderFactory(
+  sdk: OpenRouterSdk,
+  provider: ProviderConfig,
+): OpenRouterProviderFactory {
+  return sdk.createOpenRouter({
+    apiKey: provider.apiKey,
+    baseURL: provider.baseUrl,
+    headers: provider.headers,
+    extraBody: provider.providerOptions,
+  });
+}
+
+function validateRoutingDecision(
+  value: unknown,
+): RoutingDecisionValidationResult {
+  const decision = toRoutingDecision(value);
+
+  return decision
+    ? {
+        success: true,
+        value: decision,
+      }
+    : {
+        success: false,
+        error: new Error("Malformed routing decision."),
+      };
+}
+
+function toRoutingDecision(value: unknown): RoutingDecision | undefined {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ["final_target", "pre_final_tasks"])
+  ) {
+    return undefined;
+  }
+
+  const finalTarget = toRoutingDecisionFinalTarget(value.final_target);
+  if (!finalTarget) {
+    return undefined;
+  }
+
+  const decision: RoutingDecision = {
+    final_target: finalTarget,
+  };
+  if ("pre_final_tasks" in value) {
+    const tasks = toRoutingDecisionPreFinalTasks(value.pre_final_tasks);
+    if (!tasks) {
+      return undefined;
+    }
+    decision.pre_final_tasks = tasks;
+  }
+
+  return decision;
+}
+
+function toRoutingDecisionFinalTarget(
+  value: unknown,
+): RoutingDecisionFinalTarget | undefined {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return undefined;
+  }
+
+  if (value.type === "delegate") {
+    if (
+      !hasOnlyKeys(value, [
+        "type",
+        "target_model",
+        "matched_capability",
+        "reason",
+      ]) ||
+      !isNonEmptyString(value.target_model) ||
+      !isNonEmptyString(value.matched_capability) ||
+      !isOptionalNonEmptyString(value.reason)
+    ) {
+      return undefined;
+    }
+
+    const target: RoutingDecisionFinalTarget = {
+      type: "delegate",
+      target_model: value.target_model,
+      matched_capability: value.matched_capability,
+    };
+    if (typeof value.reason === "string") {
+      target.reason = value.reason;
+    }
+
+    return target;
+  }
+
+  if (value.type === "orchestrator_fallback") {
+    if (
+      !hasOnlyKeys(value, ["type", "reason"]) ||
+      !isOptionalNonEmptyString(value.reason)
+    ) {
+      return undefined;
+    }
+
+    const target: RoutingDecisionFinalTarget = {
+      type: "orchestrator_fallback",
+    };
+    if (typeof value.reason === "string") {
+      target.reason = value.reason;
+    }
+
+    return target;
+  }
+
+  return undefined;
+}
+
+function toRoutingDecisionPreFinalTasks(
+  value: unknown,
+): RoutingDecisionPreFinalTask[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const tasks: RoutingDecisionPreFinalTask[] = [];
+  for (const item of value) {
+    const task = toRoutingDecisionPreFinalTask(item);
+    if (!task) {
+      return undefined;
+    }
+    tasks.push(task);
+  }
+
+  return tasks;
+}
+
+function toRoutingDecisionPreFinalTask(
+  value: unknown,
+): RoutingDecisionPreFinalTask | undefined {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      "task_id",
+      "target_model",
+      "matched_capability",
+      "task",
+      "depends_on",
+    ]) ||
+    !isNonEmptyString(value.task_id) ||
+    !isNonEmptyString(value.target_model) ||
+    !isNonEmptyString(value.matched_capability) ||
+    !isNonEmptyString(value.task) ||
+    !isNonEmptyStringArray(value.depends_on)
+  ) {
+    return undefined;
+  }
+
+  return {
+    task_id: value.task_id,
+    target_model: value.target_model,
+    matched_capability: value.matched_capability,
+    task: value.task,
+    depends_on: value.depends_on,
+  };
 }
 
 function toInternalToolsOption(
@@ -338,8 +568,18 @@ function toModelMessages(
 
 function toCallSettings(
   defaults: Record<string, unknown>,
-): Partial<OpenRouterGenerateTextOptions> {
-  const settings: Partial<OpenRouterGenerateTextOptions> = {};
+): Partial<
+  Pick<
+    OpenRouterGenerateTextOptions,
+    "temperature" | "topP" | "maxOutputTokens"
+  >
+> {
+  const settings: Partial<
+    Pick<
+      OpenRouterGenerateTextOptions,
+      "temperature" | "topP" | "maxOutputTokens"
+    >
+  > = {};
   if (typeof defaults.temperature === "number") {
     settings.temperature = defaults.temperature;
   }
@@ -488,6 +728,25 @@ function toStringArray(value: unknown): string[] | undefined {
   }
 
   return value.filter((item): item is string => typeof item === "string");
+}
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  allowedKeys: string[],
+): boolean {
+  return Object.keys(value).every((key) => allowedKeys.includes(key));
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isOptionalNonEmptyString(value: unknown): boolean {
+  return value === undefined || isNonEmptyString(value);
+}
+
+function isNonEmptyStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(isNonEmptyString);
 }
 
 function toUsage(usage: OpenRouterUsage | undefined): LlmUsage {
