@@ -10,7 +10,7 @@
     "format:write": "prettier --write \"{src,test}/**/*.ts\" \"*.json\" \"config/**/*.json\"",
     "lint": "eslint \"{src,test}/**/*.ts\"",
     "start": "node dist/main.js",
-    "start:dev": "ts-node src/main.ts",
+    "start:dev": "ts-node --files src/main.ts",
     "test": "jest --runInBand",
     "test:e2e": "jest --config jest-e2e.config.js --runInBand",
     "typecheck": "tsc --noEmit -p tsconfig.json"

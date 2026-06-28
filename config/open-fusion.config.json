@@ -9,9 +9,7 @@
       {
         "id": "local-dev",
         "tokenEnv": "OPEN_FUSION_DEV_API_KEY",
-        "allowedRoutes": [
-          "default"
-        ]
+        "allowedRoutes": ["default"]
       }
     ]
   },
@@ -31,20 +29,25 @@
       "provider": "openrouter",
       "model": "google/gemini-3.5-flash",
       "role": "orchestrator",
-      "capabilities": [
-        "general"
-      ],
+      "capabilities": ["general"],
       "defaults": {
         "temperature": 0.2
       }
     },
     "worker.fast": {
       "provider": "openrouter",
-      "model": "moonshotai/kimi-k2.7-code",
+      "model": "google/gemini-3.5-flash",
       "role": "delegate",
-      "capabilities": [
-        "coding"
-      ],
+      "capabilities": ["code", "general"],
+      "defaults": {
+        "temperature": 0.3
+      }
+    },
+    "worker.plan": {
+      "provider": "openrouter",
+      "model": "minimax/minimax-m3",
+      "role": "delegate",
+      "capabilities": ["plan"],
       "defaults": {
         "temperature": 0.3
       }
@@ -54,9 +57,7 @@
     "default": {
       "publicModel": "route/default",
       "orchestrator": "orchestrator.default",
-      "allowedDelegateModels": [
-        "worker.fast"
-      ],
+      "allowedDelegateModels": ["worker.fast"],
       "maxDelegations": 3,
       "maxDepth": 1,
       "timeoutMs": 60000,
@@ -67,10 +68,6 @@
   },
   "observability": {
     "logLevel": "info",
-    "redact": [
-      "apiKey",
-      "token",
-      "authorization"
-    ]
+    "redact": ["apiKey", "token", "authorization"]
   }
 }

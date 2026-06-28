@@ -13,7 +13,13 @@ import { redactSensitive } from "../errors/redact-sensitive";
 import {
   LlmInvocationLogEvent,
   OperationalLoggerService,
+  RoutingLogEvent,
 } from "../ops/operational-logger.service";
+import {
+  CanonicalRoutingCapability,
+  SPECIALIZED_ROUTING_CAPABILITY_PRIORITY,
+  hasCanonicalRoutingCapability,
+} from "../routing/routing-capabilities";
 import {
   DelegateLlmToolCall,
   DelegateModelContext,
@@ -42,6 +48,36 @@ export interface OrchestrationRunContext {
   routeId?: string;
   streamFinalOnly?: boolean;
   clientTools?: unknown[];
+}
+
+interface CapabilityClassification {
+  capability: CanonicalRoutingCapability;
+  method: "heuristic" | "default_general";
+  confidence?: number;
+}
+
+type StreamingFinalTarget =
+  | {
+      kind: "delegate";
+      classification: CapabilityClassification;
+      toolCall: DelegateLlmToolCall;
+    }
+  | {
+      kind: "orchestrator_fallback";
+      classification: CapabilityClassification;
+      missingCapability: Exclude<CanonicalRoutingCapability, "general">;
+    };
+
+interface InternalAgentTask {
+  id: string;
+  toolCall: DelegateLlmToolCall;
+  dependencies: string[];
+}
+
+interface StreamingExecutionGraph {
+  preFinalTasks: InternalAgentTask[];
+  finalTarget: StreamingFinalTarget;
+  delegationAttemptCount: number;
 }
 
 @Injectable()
@@ -120,21 +156,37 @@ export class OrchestrationService {
 
     const delegateModels = this.config.listAllowedDelegateModels(route);
     const deadline = Date.now() + route.timeoutMs;
+    const classification = classifyRequestCapability(request);
+    const resolvedFinalTarget = resolveStreamingFinalTarget(
+      request,
+      route,
+      delegateModels,
+      classification,
+    );
+    this.logRoutingClassified(
+      context,
+      route,
+      classification,
+      resolvedFinalTarget,
+    );
     const planning = await this.runStreamingRouterPlanning(
       request,
       context,
       route,
       delegateModels,
       deadline,
+      classification,
+      resolvedFinalTarget,
     );
 
-    if (planning.delegateToolCall) {
+    if (planning.finalTarget.kind === "delegate") {
       yield* this.streamRoutedDelegate(
         request,
         context,
         route,
-        planning.delegateToolCall,
+        planning.finalTarget.toolCall,
         deadline,
+        planning.preFinalToolResults,
       );
       return;
     }
@@ -153,18 +205,26 @@ export class OrchestrationService {
     });
 
     try {
-      for await (const chunk of this.generation.stream({
-        modelId: route.orchestrator,
-        publicModelId: route.publicModel,
-        requestId: context.requestId,
-        routeId: context.routeId ?? route.id,
-        role: "orchestrator",
-        messages: request.messages,
-        system: buildFinalSynthesisSystemPrompt(route),
-        clientTools: context.clientTools,
-        streamFinalOnly: context.streamFinalOnly ?? route.streamFinalOnly,
-        timeoutMs: synthesisTimeoutMs,
-      })) {
+      for await (const chunk of streamWithDeadline(
+        this.generation.stream({
+          modelId: route.orchestrator,
+          publicModelId: route.publicModel,
+          requestId: context.requestId,
+          routeId: context.routeId ?? route.id,
+          role: "orchestrator",
+          messages: request.messages,
+          system: buildFinalSynthesisSystemPrompt(route),
+          clientTools: context.clientTools,
+          toolResults:
+            planning.preFinalToolResults.length > 0
+              ? planning.preFinalToolResults
+              : undefined,
+          streamFinalOnly: context.streamFinalOnly ?? route.streamFinalOnly,
+          timeoutMs: synthesisTimeoutMs,
+        }),
+        deadline,
+        route,
+      )) {
         if (chunk.content !== "") {
           yield {
             content: chunk.content,
@@ -204,8 +264,11 @@ export class OrchestrationService {
     route: RouteConfig,
     delegateModels: DelegateModelContext[],
     deadline: number,
+    classification: CapabilityClassification,
+    resolvedFinalTarget: StreamingFinalTarget,
   ): Promise<{
-    delegateToolCall?: DelegateLlmToolCall;
+    finalTarget: StreamingFinalTarget;
+    preFinalToolResults: DelegateToolResult[];
   }> {
     const orchestratorTimeoutMs = remainingMs(deadline, route);
     const planningLogContext = this.createInvocationLogContext({
@@ -228,7 +291,12 @@ export class OrchestrationService {
           routeId: context.routeId ?? route.id,
           role: "orchestrator",
           messages: request.messages,
-          system: buildStreamingRouterSystemPrompt(route, delegateModels),
+          system: buildStreamingRouterSystemPrompt(
+            route,
+            delegateModels,
+            classification,
+            resolvedFinalTarget,
+          ),
           delegateModels,
           internalTools: ["delegate_llm"],
           clientTools: context.clientTools,
@@ -247,39 +315,34 @@ export class OrchestrationService {
       throw error;
     }
 
-    if (
-      orchestratorResult.toolCalls === undefined ||
-      orchestratorResult.toolCalls.length === 0
-    ) {
-      const fallbackDelegate = selectCapabilityDelegate(
-        request,
-        delegateModels,
-        "coding",
-      );
-      if (fallbackDelegate) {
-        return {
-          delegateToolCall: fallbackDelegate,
-        };
-      }
-      return {};
-    }
-
-    const delegateToolCalls = orchestratorResult.toolCalls.filter(
+    const toolCalls = orchestratorResult.toolCalls ?? [];
+    const delegateToolCalls = toolCalls.filter(
       (toolCall) => toolCall.name === "delegate_llm",
     );
-    if (delegateToolCalls.length !== orchestratorResult.toolCalls.length) {
+    if (delegateToolCalls.length !== toolCalls.length) {
       throw OpenAiHttpError.providerError(
         "Orchestrator requested an unsupported internal tool for streaming.",
       );
     }
-    if (delegateToolCalls.length > 1) {
-      throw OpenAiHttpError.providerError(
-        "Orchestrator requested multiple delegate targets for a streaming response.",
-      );
-    }
+
+    const graph = normalizeStreamingExecutionGraph(
+      delegateToolCalls,
+      resolvedFinalTarget,
+      delegateModels,
+    );
+    validateStreamingExecutionGraph(graph, route, delegateModels);
+    this.logRoutingGraphValidated(context, route, graph);
+    const preFinalToolResults = await this.executePreFinalAgentTasks(
+      request,
+      context,
+      route,
+      graph.preFinalTasks,
+      deadline,
+    );
 
     return {
-      delegateToolCall: delegateToolCalls[0],
+      finalTarget: graph.finalTarget,
+      preFinalToolResults,
     };
   }
 
@@ -289,6 +352,7 @@ export class OrchestrationService {
     route: RouteConfig,
     toolCall: DelegateLlmToolCall,
     deadline: number,
+    toolResults: DelegateToolResult[] = [],
   ): AsyncIterable<OrchestrationStreamChunk> {
     if (!this.generation.stream) {
       throw OpenAiHttpError.providerError(
@@ -322,17 +386,22 @@ export class OrchestrationService {
     );
 
     try {
-      for await (const chunk of this.generation.stream({
-        modelId: targetModel,
-        publicModelId: request.model,
-        requestId: context.requestId,
-        routeId: context.routeId ?? route.id,
-        role: "delegate",
-        messages: buildDelegateMessages(toolCall),
-        system: toolCall.arguments.output_contract,
-        streamFinalOnly: route.streamFinalOnly,
-        timeoutMs: delegateTimeoutMs,
-      })) {
+      for await (const chunk of streamWithDeadline(
+        this.generation.stream({
+          modelId: targetModel,
+          publicModelId: request.model,
+          requestId: context.requestId,
+          routeId: context.routeId ?? route.id,
+          role: "delegate",
+          messages: buildDelegateMessages(toolCall),
+          system: toolCall.arguments.output_contract,
+          toolResults: toolResults.length > 0 ? toolResults : undefined,
+          streamFinalOnly: route.streamFinalOnly,
+          timeoutMs: delegateTimeoutMs,
+        }),
+        Date.now() + delegateTimeoutMs,
+        route,
+      )) {
         if (chunk.content !== "") {
           yield {
             content: chunk.content,
@@ -476,12 +545,113 @@ export class OrchestrationService {
     }
   }
 
+  private async executePreFinalAgentTasks(
+    request: ChatCompletionRequest,
+    context: OrchestrationRunContext,
+    route: RouteConfig,
+    tasks: InternalAgentTask[],
+    deadline: number,
+  ): Promise<DelegateToolResult[]> {
+    const pending = new Map(tasks.map((task) => [task.id, task]));
+    const completed = new Set<string>();
+    const resultByTaskId = new Map<string, DelegateToolResult>();
+    const results: DelegateToolResult[] = [];
+    let parallelBatchCount = 0;
+    let maxParallelTasks = 0;
+
+    while (pending.size > 0) {
+      const ready = [...pending.values()].filter((task) =>
+        task.dependencies.every((dependency) => completed.has(dependency)),
+      );
+      if (ready.length === 0) {
+        throw OpenAiHttpError.providerError(
+          "Validated execution graph could not make progress.",
+        );
+      }
+      parallelBatchCount += 1;
+      maxParallelTasks = Math.max(maxParallelTasks, ready.length);
+
+      const batchResults = await this.executeReadyPreFinalBatch(
+        request,
+        context,
+        route,
+        ready,
+        deadline,
+        resultByTaskId,
+      );
+
+      ready.forEach((task, index) => {
+        const result = batchResults[index];
+        completed.add(task.id);
+        pending.delete(task.id);
+        resultByTaskId.set(task.id, result);
+        results.push(result);
+      });
+    }
+
+    this.logRoutingGraphExecuted(context, route, {
+      preFinalTaskCount: tasks.length,
+      parallelBatchCount,
+      maxParallelTasks,
+    });
+
+    return results;
+  }
+
+  private async executeReadyPreFinalBatch(
+    request: ChatCompletionRequest,
+    context: OrchestrationRunContext,
+    route: RouteConfig,
+    tasks: InternalAgentTask[],
+    deadline: number,
+    resultByTaskId: Map<string, DelegateToolResult>,
+  ): Promise<DelegateToolResult[]> {
+    const pending = tasks.map((task, index) => ({
+      index,
+      task,
+      promise: this.executeDelegateCall(
+        request,
+        context,
+        route,
+        task.toolCall,
+        deadline,
+        buildDependencyToolResults(task, resultByTaskId),
+      ).then(
+        (result) => ({ index, result }),
+        (error: unknown) => ({ index, error }),
+      ),
+    }));
+    const results = new Array<DelegateToolResult>(tasks.length);
+
+    while (pending.length > 0) {
+      const completed = await Promise.race(pending.map((item) => item.promise));
+      const pendingIndex = pending.findIndex(
+        (item) => item.index === completed.index,
+      );
+      const [finished] = pending.splice(pendingIndex, 1);
+
+      if ("error" in completed) {
+        throw completed.error;
+      }
+      if (completed.result.status !== "success") {
+        throw OpenAiHttpError.providerError(
+          `Pre-final agent task '${finished.task.id}' failed before final streaming.`,
+        );
+      }
+
+      results[completed.index] = completed.result;
+    }
+
+    return results;
+  }
+
   private async executeDelegateCall(
     request: ChatCompletionRequest,
     context: OrchestrationRunContext,
     route: RouteConfig,
     toolCall: DelegateLlmToolCall,
     deadline: number,
+    toolResults?: DelegateToolResult[],
   ): Promise<DelegateToolResult> {
     const targetModel = toolCall.arguments.target_model;
     const task = toolCall.arguments.task;
@@ -531,6 +701,7 @@ export class OrchestrationService {
           role: "delegate",
           messages: buildDelegateMessages(toolCall),
           system: toolCall.arguments.output_contract,
+          toolResults,
           streamFinalOnly: route.streamFinalOnly,
           timeoutMs: delegateTimeoutMs,
         }),
@@ -636,6 +807,69 @@ export class OrchestrationService {
       error: normalizeLogError(error, this.operationalLogger),
     });
   }
+
+  private logRoutingClassified(
+    context: OrchestrationRunContext,
+    route: RouteConfig,
+    classification: CapabilityClassification,
+    finalTarget: StreamingFinalTarget,
+  ): void {
+    this.operationalLogger?.logRouting({
+      event: "routing.classified",
+      ...this.createRoutingLogBase(context, route),
+      classifiedCapability: classification.capability,
+      classificationMethod: classification.method,
+      classificationConfidence: classification.confidence,
+      ...toFinalTargetLogFields(finalTarget),
+    });
+  }
+
+  private logRoutingGraphValidated(
+    context: OrchestrationRunContext,
+    route: RouteConfig,
+    graph: StreamingExecutionGraph,
+  ): void {
+    this.operationalLogger?.logRouting({
+      event: "routing.execution_graph.validated",
+      ...this.createRoutingLogBase(context, route),
+      preFinalTaskCount: graph.preFinalTasks.length,
+      dependencyCount: graph.preFinalTasks.reduce(
+        (total, task) => total + task.dependencies.length,
+        0,
+      ),
+      delegationAttemptCount: graph.delegationAttemptCount,
+      ...toFinalTargetLogFields(graph.finalTarget),
+    });
+  }
+
+  private logRoutingGraphExecuted(
+    context: OrchestrationRunContext,
+    route: RouteConfig,
+    summary: {
+      preFinalTaskCount: number;
+      parallelBatchCount: number;
+      maxParallelTasks: number;
+    },
+  ): void {
+    this.operationalLogger?.logRouting({
+      event: "routing.execution_graph.executed",
+      ...this.createRoutingLogBase(context, route),
+      preFinalTaskCount: summary.preFinalTaskCount,
+      parallelBatchCount: summary.parallelBatchCount,
+      maxParallelTasks: summary.maxParallelTasks,
+    });
+  }
+
+  private createRoutingLogBase(
+    context: OrchestrationRunContext,
+    route: RouteConfig,
+  ): Pick<RoutingLogEvent, "requestId" | "routeId" | "publicModel"> {
+    return {
+      requestId: context.requestId ?? "",
+      routeId: context.routeId ?? route.id,
+      publicModel: route.publicModel,
+    };
+  }
 }
 
 function buildDelegateMessages(
@@ -651,68 +885,421 @@ function buildDelegateMessages(
   return [{ role: "user", content: toolCall.arguments.task }];
 }
 
-function selectCapabilityDelegate(
-  request: ChatCompletionRequest,
-  delegateModels: DelegateModelContext[],
-  capability: string,
-): DelegateLlmToolCall | undefined {
-  if (capability !== "coding" || !isCodingRequest(request)) {
+function buildDependencyToolResults(
+  task: InternalAgentTask,
+  resultByTaskId: Map<string, DelegateToolResult>,
+): DelegateToolResult[] | undefined {
+  if (task.dependencies.length === 0) {
     return undefined;
   }
 
-  const delegate = delegateModels.find((model) =>
-    model.capabilities.includes("coding"),
-  );
-  if (!delegate) {
-    return undefined;
+  return task.dependencies.map((dependency) => {
+    const dependencyResult = resultByTaskId.get(dependency);
+    if (!dependencyResult) {
+      throw OpenAiHttpError.providerError(
+        `Execution graph dependency '${dependency}' was not available for task '${task.id}'.`,
+      );
+    }
+
+    return dependencyResult;
+  });
+}
+
+function toFinalTargetLogFields(
+  finalTarget: StreamingFinalTarget,
+): Pick<
+  RoutingLogEvent,
+  "finalTargetType" | "finalTargetModel" | "missingCapability"
+> {
+  if (finalTarget.kind === "delegate") {
+    return {
+      finalTargetType: "delegate",
+      finalTargetModel: finalTarget.toolCall.arguments.target_model,
+    };
   }
 
-  const task = compactUserTask(request);
   return {
-    id: `auto_${capability}_delegate`,
-    name: "delegate_llm",
-    arguments: {
-      target_model: delegate.id,
-      task,
-      messages: [{ role: "user", content: task }],
-      output_contract:
-        "Answer the user's coding request directly. Return concise, runnable code when appropriate.",
-      reason: `The active route has a delegate model with '${capability}' capability and the request is a coding task.`,
-    },
+    finalTargetType: "orchestrator_fallback",
+    missingCapability: finalTarget.missingCapability,
   };
 }
 
-function isCodingRequest(request: ChatCompletionRequest): boolean {
+function classifyRequestCapability(
+  request: ChatCompletionRequest,
+): CapabilityClassification {
   const content = request.messages
     .map((message) => message.content ?? "")
     .join("\n")
     .toLowerCase();
 
-  return [
-    "codigo",
-    "código",
-    "code",
-    "python",
-    "javascript",
-    "typescript",
-    "html",
-    "css",
-    "sql",
-    "bash",
-    "shell",
-    "script",
-    "programa",
-    "função",
-    "funcao",
-    "classe",
-    "debug",
-    "bug",
-    "stack trace",
-    "refator",
-    "implemente",
-    "printar",
-    "hello world",
-  ].some((keyword) => content.includes(keyword));
+  for (const capability of SPECIALIZED_ROUTING_CAPABILITY_PRIORITY) {
+    if (matchesCapability(content, capability)) {
+      return {
+        capability,
+        method: "heuristic",
+        confidence: 0.8,
+      };
+    }
+  }
+
+  return {
+    capability: "general",
+    method: "default_general",
+  };
+}
+
+function matchesCapability(
+  content: string,
+  capability: Exclude<CanonicalRoutingCapability, "general">,
+): boolean {
+  const keywords: Record<
+    Exclude<CanonicalRoutingCapability, "general">,
+    string[]
+  > = {
+    code: [
+      "codigo",
+      "código",
+      "code",
+      "python",
+      "javascript",
+      "typescript",
+      "html",
+      "css",
+      "sql",
+      "bash",
+      "shell",
+      "script",
+      "programa",
+      "função",
+      "funcao",
+      "classe",
+      "debug",
+      "bug",
+      "stack trace",
+      "refator",
+      "implemente",
+      "implementar",
+      "printar",
+      "hello world",
+    ],
+    review: [
+      "review",
+      "revise",
+      "revisar",
+      "audite",
+      "auditar",
+      "critique",
+      "analise criticamente",
+      "riscos",
+      "regressão",
+      "regressao",
+      "segurança",
+      "seguranca",
+      "correção",
+      "correcao",
+      "quality",
+    ],
+    design: [
+      "design",
+      "desenhe",
+      "ux",
+      "ui",
+      "interface",
+      "wireframe",
+      "protótipo",
+      "prototipo",
+      "layout",
+      "tela",
+      "checkout",
+      "design system",
+      "fluxo de usuário",
+      "fluxo de usuario",
+    ],
+    plan: [
+      "plano",
+      "planeje",
+      "planejar",
+      "roadmap",
+      "estratégia",
+      "estrategia",
+      "arquitetura",
+      "decomponha",
+      "decompor",
+      "passo a passo",
+      "implementation plan",
+    ],
+  };
+
+  return keywords[capability].some((keyword) => content.includes(keyword));
+}
+
+function resolveStreamingFinalTarget(
+  request: ChatCompletionRequest,
+  route: RouteConfig,
+  delegateModels: DelegateModelContext[],
+  classification: CapabilityClassification,
+): StreamingFinalTarget {
+  const delegate = delegateModels.find((model) =>
+    model.capabilities.includes(classification.capability),
+  );
+
+  if (delegate) {
+    return {
+      kind: "delegate",
+      classification,
+      toolCall: buildBackendResolvedDelegateToolCall(
+        request,
+        classification.capability,
+        delegate.id,
+      ),
+    };
+  }
+
+  if (classification.capability === "general") {
+    throw OpenAiHttpError.invalidRequest(
+      `Route '${route.id}' must expose an allowed general delegate for routed streaming.`,
+      "allowedDelegateModels",
+    );
+  }
+
+  return {
+    kind: "orchestrator_fallback",
+    classification,
+    missingCapability: classification.capability,
+  };
+}
+
+function enforceStreamingFinalTarget(
+  proposedToolCall: DelegateLlmToolCall,
+  resolvedFinalTarget: StreamingFinalTarget,
+  delegateModels: DelegateModelContext[],
+): StreamingFinalTarget {
+  if (resolvedFinalTarget.kind === "orchestrator_fallback") {
+    return resolvedFinalTarget;
+  }
+
+  const proposedTarget = proposedToolCall.arguments.target_model;
+  const resolvedTarget = resolvedFinalTarget.toolCall.arguments.target_model;
+  const proposedModel = delegateModels.find(
+    (model) => model.id === proposedTarget,
+  );
+  const hasRequiredCapability =
+    proposedModel?.capabilities.includes(
+      resolvedFinalTarget.classification.capability,
+    ) === true;
+
+  if (proposedTarget === resolvedTarget && hasRequiredCapability) {
+    return {
+      ...resolvedFinalTarget,
+      toolCall: proposedToolCall,
+    };
+  }
+
+  return resolvedFinalTarget;
+}
+
+function normalizeStreamingExecutionGraph(
+  toolCalls: DelegateLlmToolCall[],
+  resolvedFinalTarget: StreamingFinalTarget,
+  delegateModels: DelegateModelContext[],
+): StreamingExecutionGraph {
+  const preFinalTasks: InternalAgentTask[] = [];
+  const proposedFinalTargets: DelegateLlmToolCall[] = [];
+
+  for (const toolCall of toolCalls) {
+    if (toolCall.arguments.final === true) {
+      proposedFinalTargets.push(toolCall);
+      continue;
+    }
+
+    if (isPreFinalTaskCall(toolCall)) {
+      preFinalTasks.push(toInternalAgentTask(toolCall));
+      continue;
+    }
+
+    proposedFinalTargets.push(toolCall);
+  }
+
+  if (proposedFinalTargets.length > 1) {
+    throw OpenAiHttpError.providerError(
+      "Orchestrator requested multiple delegate targets for a streaming response.",
+    );
+  }
+
+  let finalTarget = resolvedFinalTarget;
+  let delegationAttemptCount = preFinalTasks.length;
+
+  if (proposedFinalTargets.length === 1) {
+    const proposedFinalTarget = proposedFinalTargets[0];
+    delegationAttemptCount += 1;
+    finalTarget = enforceStreamingFinalTarget(
+      proposedFinalTarget,
+      resolvedFinalTarget,
+      delegateModels,
+    );
+    if (
+      finalTarget.kind === "delegate" &&
+      finalTarget.toolCall.arguments.target_model !==
+        proposedFinalTarget.arguments.target_model
+    ) {
+      delegationAttemptCount += 1;
+    }
+  } else if (resolvedFinalTarget.kind === "delegate") {
+    delegationAttemptCount += 1;
+  }
+
+  return {
+    preFinalTasks,
+    finalTarget,
+    delegationAttemptCount,
+  };
+}
+
+function isPreFinalTaskCall(toolCall: DelegateLlmToolCall): boolean {
+  return (
+    toolCall.arguments.final === false ||
+    toolCall.arguments.task_id !== undefined ||
+    toolCall.arguments.depends_on !== undefined
+  );
+}
+
+function toInternalAgentTask(toolCall: DelegateLlmToolCall): InternalAgentTask {
+  return {
+    id: toolCall.arguments.task_id ?? toolCall.id,
+    toolCall,
+    dependencies: toolCall.arguments.depends_on ?? [],
+  };
+}
+
+function validateStreamingExecutionGraph(
+  graph: StreamingExecutionGraph,
+  route: RouteConfig,
+  delegateModels: DelegateModelContext[],
+): void {
+  if (graph.delegationAttemptCount > route.maxDelegations) {
+    throw OpenAiHttpError.invalidRequest(
+      `Route '${route.id}' exceeded maxDelegations (${route.maxDelegations}).`,
+      "maxDelegations",
+    );
+  }
+
+  const taskIds = new Set<string>();
+  graph.preFinalTasks.forEach((task) => {
+    if (task.id === "") {
+      throw OpenAiHttpError.providerError(
+        "Execution graph contains an agent task without an id.",
+      );
+    }
+    if (taskIds.has(task.id)) {
+      throw OpenAiHttpError.providerError(
+        `Execution graph contains duplicate agent task id '${task.id}'.`,
+      );
+    }
+    taskIds.add(task.id);
+    validateDelegateTarget(
+      route,
+      delegateModels,
+      task.toolCall.arguments.target_model,
+    );
+  });
+
+  graph.preFinalTasks.forEach((task) => {
+    task.dependencies.forEach((dependency) => {
+      if (!taskIds.has(dependency)) {
+        throw OpenAiHttpError.providerError(
+          `Execution graph task '${task.id}' depends on unknown task '${dependency}'.`,
+        );
+      }
+    });
+  });
+
+  if (hasCycle(graph.preFinalTasks)) {
+    throw OpenAiHttpError.providerError(
+      "Execution graph contains a cycle between agent tasks.",
+    );
+  }
+
+  if (graph.finalTarget.kind === "delegate") {
+    const targetModel = graph.finalTarget.toolCall.arguments.target_model;
+    const delegate = validateDelegateTarget(route, delegateModels, targetModel);
+    if (
+      !delegate.capabilities.includes(
+        graph.finalTarget.classification.capability,
+      )
+    ) {
+      throw OpenAiHttpError.providerError(
+        `Final target '${targetModel}' does not declare the classified capability '${graph.finalTarget.classification.capability}'.`,
+      );
+    }
+  }
+}
+
+function validateDelegateTarget(
+  route: RouteConfig,
+  delegateModels: DelegateModelContext[],
+  targetModel: string,
+): DelegateModelContext {
+  if (!route.allowedDelegateModels.includes(targetModel)) {
+    throw OpenAiHttpError.providerError(
+      `Execution graph selected delegate model '${targetModel}' that is not allowed for this route.`,
+    );
+  }
+
+  const delegate = delegateModels.find((model) => model.id === targetModel);
+  if (!delegate || !hasCanonicalRoutingCapability(delegate.capabilities)) {
+    throw OpenAiHttpError.providerError(
+      `Execution graph selected delegate model '${targetModel}' without a canonical routing capability.`,
+    );
+  }
+
+  return delegate;
+}
+
+function hasCycle(tasks: InternalAgentTask[]): boolean {
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+
+  const visit = (taskId: string): boolean => {
+    if (visiting.has(taskId)) {
+      return true;
+    }
+    if (visited.has(taskId)) {
+      return false;
+    }
+
+    const task = taskById.get(taskId);
+    if (!task) {
+      return false;
+    }
+
+    visiting.add(taskId);
+    const cyclic = task.dependencies.some((dependency) => visit(dependency));
+    visiting.delete(taskId);
+    visited.add(taskId);
+    return cyclic;
+  };
+
+  return tasks.some((task) => visit(task.id));
+}
+
+function buildBackendResolvedDelegateToolCall(
+  request: ChatCompletionRequest,
+  capability: CanonicalRoutingCapability,
+  targetModel: string,
+): DelegateLlmToolCall {
+  const task = compactUserTask(request);
+  return {
+    id: `auto_${capability}_final_target`,
+    name: "delegate_llm",
+    arguments: {
+      target_model: targetModel,
+      task,
+      messages: [{ role: "user", content: task }],
+      output_contract: `Answer the user's ${capability} request directly. Return only the final client-visible answer.`,
+      reason: `The backend classified this streaming request as '${capability}' and selected '${targetModel}' as the final target.`,
+    },
+  };
 }
 
 function compactUserTask(request: ChatCompletionRequest): string {
@@ -752,12 +1339,20 @@ function buildOrchestratorSystemPrompt(
 function buildStreamingRouterSystemPrompt(
   route: RouteConfig,
   delegateModels: DelegateModelContext[],
+  classification: CapabilityClassification,
+  finalTarget: StreamingFinalTarget,
 ): string {
+  const targetInstruction =
+    finalTarget.kind === "delegate"
+      ? `The backend classified this request as '${classification.capability}' by ${classification.method} and selected '${finalTarget.toolCall.arguments.target_model}' as the final streaming delegate target.`
+      : `The backend classified this request as '${classification.capability}' by ${classification.method}; no exact delegate exists, so the final streaming target is orchestrator_fallback.`;
+
   return [
     buildOrchestratorSystemPrompt(route, delegateModels),
     "For streaming requests, act only as a router.",
-    "If you use delegate_llm, choose exactly one allowed delegate model.",
-    "For coding, programming, debugging, code generation, scripts, HTML/CSS/SQL, or implementation requests, you must route to a delegate model that declares the coding capability.",
+    "Canonical routing capabilities are plan, code, review, design, and general.",
+    targetInstruction,
+    "If you use delegate_llm, choose exactly one allowed delegate model with the classified capability.",
     "The delegated model response will be streamed directly to the client with no final synthesis.",
     "Therefore the delegate task or messages must contain the complete client-visible work, not a partial draft.",
   ].join(" ");
@@ -844,6 +1439,32 @@ function remainingMs(deadline: number, route: RouteConfig): number {
   }
 
   return remaining;
+}
+
+async function* streamWithDeadline<T>(
+  stream: AsyncIterable<T>,
+  deadline: number,
+  route: RouteConfig,
+): AsyncIterable<T> {
+  const iterator = stream[Symbol.asyncIterator]();
+
+  try {
+    while (true) {
+      const next = await withTimeout(
+        iterator.next(),
+        remainingMs(deadline, route),
+        `Route '${route.id}' timed out.`,
+      );
+      if (next.done) {
+        return;
+      }
+
+      yield next.value;
+    }
+  } catch (error) {
+    await iterator.return?.().catch(() => undefined);
+    throw error;
+  }
 }
 
 function withTimeout<T>(
