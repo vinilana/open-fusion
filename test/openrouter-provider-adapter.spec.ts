@@ -9,6 +9,7 @@ import {
   LlmStreamChunk,
 } from "../src/orchestration/llm-generation.port";
 import { GatewayConfigService } from "../src/config/gateway-config.service";
+import { OpenAiHttpError } from "../src/errors/openai-http-error";
 import { minimalConfig, validEnv } from "./support/gateway-config.fixture";
 
 describe("OpenRouter provider adapter", () => {
@@ -544,13 +545,10 @@ describe("OpenRouter provider adapter", () => {
       new ProviderRegistry(config, new OpenRouterAdapter(sdk)),
     );
 
-    await expect(
-      port.generate(createGenerateRequest("missing.internal")),
-    ).rejects.toMatchObject({
-      status: 500,
-      type: "server_error",
-      code: "internal_error",
-    });
+    await expectInternalModelError(
+      () => port.generate(createGenerateRequest("missing.internal")),
+      "missing.internal",
+    );
     expect(sdk.generateTextCalls).toHaveLength(0);
   });
 
@@ -567,17 +565,13 @@ describe("OpenRouter provider adapter", () => {
       new ProviderRegistry(config, new OpenRouterAdapter(sdk)),
     );
 
-    await expect(async () => {
+    await expectInternalModelError(async () => {
       for await (const chunk of port.stream(
         createGenerateRequest("missing.internal"),
       )) {
         void chunk;
       }
-    }).rejects.toMatchObject({
-      status: 500,
-      type: "server_error",
-      code: "internal_error",
-    });
+    }, "missing.internal");
     expect(sdk.streamTextCalls).toHaveLength(0);
   });
 
@@ -619,6 +613,39 @@ function createConfig(): GatewayConfigService {
     rawConfig: minimalConfig(),
     env: validEnv(),
   });
+}
+
+async function expectInternalModelError(
+  action: () => Promise<unknown>,
+  internalModelId: string,
+): Promise<void> {
+  let caught: unknown;
+
+  try {
+    await action();
+  } catch (error) {
+    caught = error;
+  }
+
+  expect(caught).toBeInstanceOf(OpenAiHttpError);
+
+  const error = caught as OpenAiHttpError;
+  expect(error).toMatchObject({
+    status: 500,
+    type: "server_error",
+    code: "internal_error",
+  });
+
+  const body = error.toBody();
+  expect(body).toEqual({
+    error: {
+      message: "Configured internal model was not found.",
+      type: "server_error",
+      param: null,
+      code: "internal_error",
+    },
+  });
+  expect(JSON.stringify(body)).not.toContain(internalModelId);
 }
 
 function createGenerateRequest(modelId: string): LlmGenerateRequest {

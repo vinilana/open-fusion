@@ -81,7 +81,7 @@ Providers:
 - malformed provider tool payloads;
 - malformed provider-supplied delegate messages;
 - unsupported capability;
-- unknown internal model id maps to internal error;
+- unknown internal model id maps to internal error without exposing the unresolved id in the public error body;
 - provider timeout;
 - provider error normalization.
 
@@ -91,6 +91,7 @@ Ops:
 - structured log fields;
 - `chat_completion.failed` for validation/model/tools policy errors before SSE;
 - redaction;
+- generic public `internal_error` messages for internal configuration failures, with diagnostic identifiers kept out of the OpenAI-compatible response body;
 - payload limits;
 - health checks without paid provider calls.
 

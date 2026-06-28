@@ -52,7 +52,9 @@ Treat every provider result as untrusted until normalized:
 
 - Use `provider_error`/502 for upstream provider failures.
 - Use `internal_error`/500 for gateway configuration or wiring faults, such as an internal model id that cannot be resolved before calling a provider.
-- Redact provider error details before public errors or logs can expose credentials.
+- Keep public `internal_error` messages generic. Do not interpolate internal model ids, provider model ids, provider config keys, env var names, stack traces, or registry details into `OpenAiHttpError` messages returned to clients.
+- Put internal diagnostic identifiers in structured logs only, with normal redaction rules applied.
+- Redact provider error details before public errors or logs can expose credentials or internal configuration.
 
 ## Cancellation And Timeouts
 
@@ -82,3 +84,5 @@ Do not change public API controllers just to add a provider.
 ## Testing
 
 Use mocks or test doubles for provider calls by default. Add integration tests only when credentials and cost controls are explicit. Cover success, stream, tool-capable calls, malformed tool payloads, malformed delegate messages, unsupported capability, timeout, cancellation when supported, unknown internal model ids, and error normalization.
+
+For unknown internal model ids, assert both the status/code mapping and the public error body privacy: the response must not include the unresolved internal id or other internal configuration identifiers.

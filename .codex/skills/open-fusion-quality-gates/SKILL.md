@@ -29,6 +29,7 @@ A change should not be considered done until these are true or explicitly report
 - docs/specs/ADRs are updated when behavior or decisions changed;
 - public API compatibility is preserved or the breaking change is documented;
 - secrets are not logged, returned, or committed;
+- public error envelopes do not expose internal configuration identifiers such as internal model ids, provider model ids, provider config keys, env var names, stack traces, or registry details;
 - new provider/network behavior is mocked unless a live integration run was intentional.
 
 ## Suggested Commands
@@ -72,6 +73,7 @@ Known regression checks from PR review audit:
 - shared client/request domain shapes are not duplicated across services and Express typings;
 - provider-supplied tool calls and delegate messages are runtime-validated before typed use;
 - internal gateway misconfiguration maps to `internal_error`, not `provider_error`;
+- public `internal_error` messages are generic and do not include unresolved internal model ids or other internal configuration identifiers;
 - validation/model/tool-policy failures produce structured failure logs;
 - `depends_on: []` does not misclassify final delegate calls;
 - parallel delegation failures cancel in-flight work or document/test ignored late results;
