@@ -1,4 +1,4 @@
-# Spec 007: Observabilidade, resiliencia e seguranca
+# Spec 008: Observabilidade, resiliencia e seguranca
 
 ## Status
 

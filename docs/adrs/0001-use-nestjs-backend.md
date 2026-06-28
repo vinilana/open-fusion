@@ -29,4 +29,4 @@ Negativas:
 ## Specs relacionadas
 
 - [Spec 001](../specs/001-openai-compatible-api.md)
-- [Spec 007](../specs/007-observability-resilience-security.md)
+- [Spec 008](../specs/008-observability-resilience-security.md)

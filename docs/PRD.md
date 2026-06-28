@@ -54,7 +54,7 @@ O MVP deve entregar:
 5. Gateway chama o modelo orquestrador definido na rota ou na configuracao global.
 6. O orquestrador pode responder diretamente ou chamar uma tool interna para delegar uma subtarefa a outro modelo.
 7. O gateway executa a chamada delegada usando o provider adapter configurado.
-8. O orquestrador sintetiza a resposta final ou, em fluxo streaming roteado, o backend impoe a selecao de um alvo final: um delegado permitido para a capability classificada (`plan`, `code`, `review`, `design`, `general`) ou, quando faltar delegado especializado exato, o fallback explicito para o modelo do orquestrador. Quando houver tarefas internas independentes, multiplos agentes delegados podem executar em paralelo antes do stream final.
+8. O orquestrador sintetiza a resposta final ou, em fluxo streaming roteado, faz o match entre a requisicao e as capabilities declaradas pelos delegados permitidos, propondo um alvo final e tarefas internas opcionais. O backend valida mecanicamente o alvo, a capability declarada, o grafo, autorizacao, limites e fallback antes do stream final. Quando houver tarefas internas independentes, multiplos agentes delegados podem executar em paralelo antes do stream final.
 9. Gateway retorna resposta ou stream em formato compativel com OpenAI.
 
 ## 7. Requisitos funcionais
@@ -64,8 +64,8 @@ O MVP deve entregar:
 - RF-003: suportar `stream: true` usando Server-Sent Events no formato esperado por clientes OpenAI.
 - RF-004: permitir definir um orquestrador global no JSON de configuracao.
 - RF-005: permitir sobrescrever o orquestrador por rota/modelo exposto.
-- RF-006: permitir configurar modelos delegaveis com provider, model id, parametros padrao, limites e capabilities canonicas de roteamento (`plan`, `code`, `review`, `design`, `general`), exigindo ao menos um delegado `general` nas rotas com streaming roteado.
-- RF-007: permitir o orquestrador chamar uma tool interna para delegar trabalho a modelos permitidos, com enforcement deterministico de grafo interno, paralelismo de agentes quando dependencias permitirem, alvo final unico pelo backend e fallback para o modelo do orquestrador tratado como caminho distinto de `general`.
+- RF-006: permitir configurar modelos delegaveis com provider, model id, parametros padrao, limites e capabilities declaradas usadas pelo orquestrador para match de roteamento.
+- RF-007: permitir o orquestrador chamar uma tool interna para delegar trabalho a modelos permitidos, com match de capabilities feito pela LLM orquestradora, enforcement deterministico de grafo interno, paralelismo de agentes quando dependencias permitirem, alvo final unico validado pelo backend e fallback explicito para o modelo do orquestrador quando permitido pela rota.
 - RF-008: suportar OpenRouter como provider oficial inicial.
 - RF-009: validar a configuracao no boot e falhar de forma explicita se ela for invalida.
 - RF-010: mascarar segredos em logs, erros e respostas.
@@ -88,7 +88,8 @@ O MVP deve entregar:
 - [Spec 004: Providers e OpenRouter](./specs/004-provider-adapters-openrouter.md)
 - [Spec 005: Streaming, tools e normalizacao de respostas](./specs/005-streaming-tools-response-normalization.md)
 - [Spec 006: Routed streaming with internal delegations](./specs/006-streaming-final-with-internal-delegations.md)
-- [Spec 007: Observabilidade, resiliencia e seguranca](./specs/007-observability-resilience-security.md)
+- [Spec 007: Match de capabilities pelo orquestrador](./specs/007-orchestrator-capability-matching.md)
+- [Spec 008: Observabilidade, resiliencia e seguranca](./specs/008-observability-resilience-security.md)
 
 ## 10. Referencias de ADR
 

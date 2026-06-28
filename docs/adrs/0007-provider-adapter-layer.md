@@ -29,4 +29,5 @@ Negativas:
 ## Specs relacionadas
 
 - [Spec 004](../specs/004-provider-adapters-openrouter.md)
-- [Spec 007](../specs/007-observability-resilience-security.md)
+- [Spec 007](../specs/007-orchestrator-capability-matching.md)
+- [Spec 008](../specs/008-observability-resilience-security.md)
