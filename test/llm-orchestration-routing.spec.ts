@@ -193,6 +193,8 @@ class SlowFinalStreamGenerationPort implements LlmGenerationPort {
 
 class FailingParallelPreFinalGenerationPort implements LlmGenerationPort {
   readonly requests: LlmGenerateRequest[] = [];
+  slowTaskAbortSignal: AbortSignal | undefined;
+  slowTaskCompleted = false;
 
   async generate(request: LlmGenerateRequest): Promise<LlmGenerateResult> {
     this.requests.push(request);
@@ -230,7 +232,9 @@ class FailingParallelPreFinalGenerationPort implements LlmGenerationPort {
       throw OpenAiHttpError.providerError("Pre-final task failed.");
     }
 
+    this.slowTaskAbortSignal = request.abortSignal;
     await delay(150);
+    this.slowTaskCompleted = true;
     return {
       content: "slow result that should be ignored",
       finishReason: "stop",
@@ -1182,6 +1186,50 @@ describe("LLM orchestration routing", () => {
     ).toEqual(["write draft", "review draft"]);
   });
 
+  it("treats depends_on empty array as a final delegate call without pre-final context", async () => {
+    const generation = new ScriptedGenerationPort(
+      [
+        {
+          content: "",
+          finishReason: "tool_calls",
+          toolCalls: [
+            {
+              id: "call_final",
+              name: "delegate_llm",
+              arguments: {
+                target_model: "worker.fast",
+                task: "answer directly",
+                depends_on: [],
+              },
+            },
+          ],
+        },
+      ],
+      [["final delegate answer"]],
+    );
+    const service = new OrchestrationService(createConfigService(), generation);
+
+    const chunks = [];
+    for await (const chunk of service.streamFinal(
+      createRequest(routeModel, "hello"),
+      createRuntimeContext(),
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { content: "final delegate answer", finishReason: null },
+      { content: "", finishReason: "stop" },
+    ]);
+    expect(generation.requests.map((request) => request.modelId)).toEqual([
+      "orchestrator.default",
+    ]);
+    expect(generation.streamRequests.map((request) => request.modelId)).toEqual(
+      ["worker.fast"],
+    );
+    expect(generation.streamRequests[0].toolResults).toBeUndefined();
+  });
+
   it("rejects pre-final agent graphs with unresolved dependencies before provider calls", async () => {
     const generation = new ScriptedGenerationPort([
       {
@@ -1399,6 +1447,11 @@ describe("LLM orchestration routing", () => {
     });
 
     expect(Date.now() - startedAt).toBeLessThan(100);
+    expect(generation.slowTaskAbortSignal?.aborted).toBe(true);
+    expect(generation.slowTaskCompleted).toBe(false);
+    expect(
+      generation.requests.filter((request) => request.role === "delegate"),
+    ).toHaveLength(2);
   });
 
   it("logs orchestration phases with requestId without prompts or responses", async () => {

@@ -55,6 +55,41 @@ describe("GatewayConfigService", () => {
     });
   });
 
+  it("loads configured payload and message limits for routes", () => {
+    const rawConfig = minimalConfig();
+    rawConfig.routes.default.maxMessages = 10;
+    rawConfig.routes.default.maxMessageContentLength = 4096;
+    rawConfig.routes.default.maxPayloadBytes = 65536;
+
+    const config = new GatewayConfigService({
+      rawConfig,
+      env: validEnv(),
+    });
+
+    expect(config.resolveRouteByPublicModel("route/default")).toMatchObject({
+      maxMessages: 10,
+      maxMessageContentLength: 4096,
+      maxPayloadBytes: 65536,
+    });
+  });
+
+  it.each([["maxMessages"], ["maxMessageContentLength"], ["maxPayloadBytes"]])(
+    "rejects invalid route limit %s",
+    (field) => {
+      const config = minimalConfig();
+      (config.routes.default as Record<string, unknown>)[field] = 0;
+
+      expectConfigErrorAt(
+        () =>
+          new GatewayConfigService({
+            rawConfig: config,
+            env: validEnv(),
+          }),
+        `routes.default.${field}`,
+      );
+    },
+  );
+
   it("resolves required secrets from a dotenv file", () => {
     const { path, cleanup } = writeConfig(minimalConfig());
     const directory = mkdtempSync(join(tmpdir(), "open-fusion-env-"));

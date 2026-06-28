@@ -55,6 +55,7 @@ export interface LlmGenerateRequest {
   toolResults?: DelegateToolResult[];
   streamFinalOnly?: boolean;
   timeoutMs: number;
+  abortSignal?: AbortSignal;
 }
 
 export interface LlmUsage {

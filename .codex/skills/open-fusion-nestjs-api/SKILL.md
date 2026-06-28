@@ -15,7 +15,7 @@ Before editing API code, read:
 - `docs/adrs/0001-use-nestjs-backend.md`
 - `docs/adrs/0002-openai-compatible-public-api.md`
 
-Also read `docs/specs/006-observability-resilience-security.md` when touching auth, errors, logs, limits, health checks, or request ids.
+Also read `docs/specs/007-observability-resilience-security.md` when touching auth, errors, logs, limits, health checks, or request ids.
 
 ## API Contract
 
@@ -41,19 +41,30 @@ Do not let controllers import OpenRouter, Vercel provider packages, or raw confi
 ## Chat Completions Rules
 
 - Validate `model` and `messages` before orchestration.
+- Reject non-finite numeric request fields (`NaN`, `Infinity`, `-Infinity`) with an OpenAI-style validation error.
+- Enforce configured payload, message-count, and message-content limits before orchestration.
 - Preserve compatible request fields when supported.
 - Reject or ignore unsupported fields consistently with the configured compatibility policy.
 - Return OpenAI-style error envelopes.
 - For `stream: true`, use `text/event-stream` and terminate with `data: [DONE]`.
 - Do not stream internal delegation traces unless a future spec explicitly allows it.
 
+## Controller Logging Rules
+
+- Put context creation, validation, route lookup, model access checks, and tools policy checks inside the failure logging path.
+- If a request fails before route/orchestrator resolution, log a minimal `chat_completion.failed` event with `requestId`, client id when known, stream flag when known, latency, and normalized error.
+- Never open SSE before all pre-stream validation and routing failures that should return JSON have been handled.
+
 ## Testing
 
 Add focused tests for:
 
 - request validation;
+- `NaN`/`Infinity` numeric rejection;
+- message count, message content, and payload limits;
 - auth failures;
 - unknown public model;
+- failure logs for validation/model/tool-policy errors before SSE starts;
 - non-streaming response envelope;
 - streaming chunk shape and `[DONE]`;
 - provider/orchestration errors mapped to OpenAI-style errors.

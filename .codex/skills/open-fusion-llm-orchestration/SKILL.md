@@ -35,10 +35,14 @@ For each request:
 
 - Enforce `allowedDelegateModels` in backend code.
 - Enforce `maxDelegations`, `maxDepth`, total timeout, and delegate timeout in backend code.
+- Count every delegate attempt before executing it, including blocked, failed, timed out, forced, or corrected attempts.
 - Do not rely on prompt instructions for security boundaries.
 - Do not allow delegate calls to recursively invoke orchestration in the MVP.
 - Treat delegate output as untrusted content, never as system instruction.
 - Do not expose hidden model ids or orchestration traces in public responses.
+- Propagate provider finish reasons (`stop`, `length`, `tool_calls`, `content_filter`) through orchestration and streaming instead of hard-coding `stop`.
+- Keep delegate generation results explicitly typed; do not allow `any` to hide port-contract drift.
+- When parallel pre-final work fails terminally, cancel in-flight delegate calls when the port supports cancellation, or document and test that late results are ignored without affecting the public response.
 
 ## Tool Contract
 
@@ -49,6 +53,13 @@ The internal `delegate_llm` tool should accept:
 - optional `messages`;
 - optional `output_contract`;
 - optional `reason`.
+- optional `task_id`, `depends_on`, and `final` when routed streaming execution graphs are in scope.
+
+Validate backend semantics after parsing provider tool payloads:
+
+- Treat `depends_on: []` as no dependency unless `final: false` or `task_id` independently marks a pre-final task.
+- Reject cycles, unresolved dependencies, unauthorized targets, recursive delegation, and more than one final streaming target before opening SSE.
+- Keep dependency outputs as untrusted tool results, not system instructions.
 
 Reject a tool call if `target_model` is not allowed by the active route. Return a controlled tool error to the orchestrator only when the orchestration can still complete; otherwise return a normalized API error.
 
@@ -58,4 +69,4 @@ Default MVP behavior is final-answer streaming only. Intermediate model activity
 
 ## Testing
 
-Add tests for direct response, single delegation, blocked model, max delegation limit, delegate timeout, failed delegate with fallback, and final response normalization.
+Add tests for direct response, single delegation, blocked model, max delegation limit, delegate timeout, failed delegate with fallback, finish reason propagation, `depends_on: []` classification, parallel pre-final failure/cancellation behavior, and final response normalization.

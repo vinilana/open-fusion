@@ -1,12 +1,8 @@
 import { Injectable } from "@nestjs/common";
 
+import { AuthenticatedClient } from "../auth/authenticated-client";
 import { GatewayConfigService } from "../config/gateway-config.service";
 import { ModelsResponse } from "./openai-types";
-
-interface AuthenticatedClient {
-  id: string;
-  allowedModels: string[];
-}
 
 @Injectable()
 export class ModelsService {

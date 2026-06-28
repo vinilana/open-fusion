@@ -87,7 +87,7 @@ O MVP deve entregar:
 - [Spec 003: Configuracao JSON unica](./specs/003-single-json-configuration.md)
 - [Spec 004: Providers e OpenRouter](./specs/004-provider-adapters-openrouter.md)
 - [Spec 005: Streaming, tools e normalizacao de respostas](./specs/005-streaming-tools-response-normalization.md)
-- [Spec 006: Routed streaming with internal delegations](./specs/006-streaming-final-with-internal-delegations.md) - proxima em implementacao
+- [Spec 006: Routed streaming with internal delegations](./specs/006-streaming-final-with-internal-delegations.md)
 - [Spec 007: Observabilidade, resiliencia e seguranca](./specs/007-observability-resilience-security.md)
 
 ## 10. Referencias de ADR

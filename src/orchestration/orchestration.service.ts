@@ -606,21 +606,26 @@ export class OrchestrationService {
     deadline: number,
     resultByTaskId: Map<string, DelegateToolResult>,
   ): Promise<DelegateToolResult[]> {
-    const pending = tasks.map((task, index) => ({
-      index,
-      task,
-      promise: this.executeDelegateCall(
-        request,
-        context,
-        route,
-        task.toolCall,
-        deadline,
-        buildDependencyToolResults(task, resultByTaskId),
-      ).then(
-        (result) => ({ index, result }),
-        (error: unknown) => ({ index, error }),
-      ),
-    }));
+    const pending = tasks.map((task, index) => {
+      const abortController = new AbortController();
+      return {
+        index,
+        task,
+        abortController,
+        promise: this.executeDelegateCall(
+          request,
+          context,
+          route,
+          task.toolCall,
+          deadline,
+          buildDependencyToolResults(task, resultByTaskId),
+          abortController.signal,
+        ).then(
+          (result) => ({ index, result }),
+          (error: unknown) => ({ index, error }),
+        ),
+      };
+    });
     const results = new Array<DelegateToolResult>(tasks.length);
 
     while (pending.length > 0) {
@@ -631,9 +636,11 @@ export class OrchestrationService {
       const [finished] = pending.splice(pendingIndex, 1);
 
       if ("error" in completed) {
+        abortPendingDelegateCalls(pending);
         throw completed.error;
       }
       if (completed.result.status !== "success") {
+        abortPendingDelegateCalls(pending);
         throw OpenAiHttpError.providerError(
           `Pre-final agent task '${finished.task.id}' failed before final streaming.`,
         );
@@ -652,6 +659,7 @@ export class OrchestrationService {
     toolCall: DelegateLlmToolCall,
     deadline: number,
     toolResults?: DelegateToolResult[],
+    abortSignal?: AbortSignal,
   ): Promise<DelegateToolResult> {
     const targetModel = toolCall.arguments.target_model;
     const task = toolCall.arguments.task;
@@ -690,7 +698,7 @@ export class OrchestrationService {
       remainingMs(deadline, route),
     );
 
-    let delegateResult;
+    let delegateResult: LlmGenerateResult;
     try {
       delegateResult = await withTimeout(
         this.generation.generate({
@@ -704,6 +712,7 @@ export class OrchestrationService {
           toolResults,
           streamFinalOnly: route.streamFinalOnly,
           timeoutMs: delegateTimeoutMs,
+          abortSignal,
         }),
         delegateTimeoutMs,
         `Delegation to '${targetModel}' timed out.`,
@@ -902,6 +911,14 @@ function buildDependencyToolResults(
     }
 
     return dependencyResult;
+  });
+}
+
+function abortPendingDelegateCalls(
+  pending: Array<{ abortController: AbortController }>,
+): void {
+  pending.forEach((item) => {
+    item.abortController.abort();
   });
 }
 
@@ -1159,7 +1176,7 @@ function isPreFinalTaskCall(toolCall: DelegateLlmToolCall): boolean {
   return (
     toolCall.arguments.final === false ||
     toolCall.arguments.task_id !== undefined ||
-    toolCall.arguments.depends_on !== undefined
+    (toolCall.arguments.depends_on?.length ?? 0) > 0
   );
 }
 

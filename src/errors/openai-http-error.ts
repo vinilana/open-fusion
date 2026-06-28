@@ -77,11 +77,15 @@ export class OpenAiHttpError extends Error {
     });
   }
 
-  static rateLimited(message = "Rate limit exceeded."): OpenAiHttpError {
+  static rateLimited(
+    message = "Rate limit exceeded.",
+    param: string | null = null,
+  ): OpenAiHttpError {
     return new OpenAiHttpError({
       status: 429,
       message,
       type: "rate_limit_error",
+      param,
       code: "rate_limit_exceeded",
     });
   }

@@ -3,6 +3,7 @@ import { Test } from "@nestjs/testing";
 import request from "supertest";
 
 import { AppModule } from "../src/app.module";
+import { configureHttpApp } from "../src/http-app";
 import { OpenAiHttpError } from "../src/errors/openai-http-error";
 import { RawGatewayConfig } from "../src/config/gateway-config.service";
 import {
@@ -38,14 +39,17 @@ describe("OpenAI-compatible API", () => {
       .useClass(StubLlmGenerationPort)
       .compile();
 
-    app = moduleRef.createNestApplication();
+    app = moduleRef.createNestApplication({
+      bodyParser: false,
+    });
+    configureHttpApp(app);
     await app.init();
   });
 
   afterAll(async () => {
     await app?.close();
     cleanupConfig?.();
-    process.env = previousEnv;
+    restoreProcessEnv(previousEnv);
   });
 
   it("rejects unauthenticated /v1 requests with an OpenAI-compatible error", async () => {
@@ -122,6 +126,77 @@ describe("OpenAI-compatible API", () => {
         code: "invalid_request",
       },
     });
+  });
+
+  it("returns an OpenAI-compatible error when the JSON body exceeds the configured parser limit", async () => {
+    const rawConfig = minimalConfig();
+    rawConfig.routes.default.maxPayloadBytes = 80;
+    const limitedApp = await createAppWithGenerationPort(
+      StubLlmGenerationPort,
+      rawConfig,
+    );
+
+    try {
+      const response = await request(limitedApp.app.getHttpServer())
+        .post("/v1/chat/completions")
+        .set(
+          "Authorization",
+          ["Bearer", validEnv().OPEN_FUSION_DEV_API_KEY].join(" "),
+        )
+        .set("x-request-id", "req-payload-limit")
+        .send({
+          model: "route/default",
+          messages: [{ role: "user", content: "payload too large" }],
+        })
+        .expect(429);
+
+      expect(response.headers["content-type"]).toContain("application/json");
+      expect(response.headers["x-request-id"]).toBe("req-payload-limit");
+      expect(response.body).toEqual({
+        error: {
+          message: "Request payload exceeds the configured limit of 80 bytes.",
+          type: "rate_limit_error",
+          param: null,
+          code: "rate_limit_exceeded",
+        },
+      });
+    } finally {
+      await limitedApp.close();
+    }
+  });
+
+  it("logs validation failures that happen before route context is available", async () => {
+    const logSpy = jest
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    try {
+      await request(app.getHttpServer())
+        .post("/v1/chat/completions")
+        .set("Authorization", "Bearer test-gateway-key")
+        .set("x-request-id", "req-validation-log")
+        .send({
+          model: "route/default",
+          stream: true,
+          messages: "invalid",
+        })
+        .expect(400);
+
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining('"event":"chat_completion.failed"'),
+      );
+      const serializedLogs = logSpy.mock.calls.flat().join("\n");
+      expect(serializedLogs).toContain('"requestId":"req-validation-log"');
+      expect(serializedLogs).toContain('"clientId":"local-dev"');
+      expect(serializedLogs).toContain('"publicModel":"route/default"');
+      expect(serializedLogs).toContain('"stream":true');
+      expect(serializedLogs).toContain('"status":"error"');
+      expect(serializedLogs).toContain('"type":"invalid_request_error"');
+      expect(serializedLogs).toContain('"code":"invalid_request"');
+      expect(serializedLogs).toContain('"param":"messages"');
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 
   it("returns 403 when the client cannot access the requested model", async () => {
@@ -545,7 +620,10 @@ async function createAppWithGenerationPort(
     .useClass(generationPort)
     .compile();
 
-  const app = moduleRef.createNestApplication();
+  const app = moduleRef.createNestApplication({
+    bodyParser: false,
+  });
+  configureHttpApp(app);
   await app.init();
 
   return {
@@ -553,9 +631,18 @@ async function createAppWithGenerationPort(
     async close() {
       await app.close();
       config.cleanup();
-      process.env = previousEnv;
+      restoreProcessEnv(previousEnv);
     },
   };
+}
+
+function restoreProcessEnv(previousEnv: NodeJS.ProcessEnv): void {
+  Object.keys(process.env).forEach((key) => {
+    if (!(key in previousEnv)) {
+      delete process.env[key];
+    }
+  });
+  Object.assign(process.env, previousEnv);
 }
 
 class FailingBeforeFirstChunkGenerationPort implements LlmGenerationPort {

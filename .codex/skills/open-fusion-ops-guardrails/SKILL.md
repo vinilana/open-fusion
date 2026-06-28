@@ -10,7 +10,7 @@ description: Add and enforce Open Fusion operational guardrails. Use when Codex 
 Before editing operational, security, or resilience code, read:
 
 - `docs/PRD.md`
-- `docs/specs/006-observability-resilience-security.md`
+- `docs/specs/007-observability-resilience-security.md`
 - `docs/specs/001-openai-compatible-api.md`
 - `docs/adrs/0002-openai-compatible-public-api.md`
 
@@ -31,6 +31,8 @@ Every `/v1/*` request should have:
 - structured completion log;
 - normalized OpenAI-style error response on failure.
 
+Log failures consistently even when validation, model access, route resolution, or tools policy fails before a full route context exists.
+
 ## Logging
 
 Log structured fields:
@@ -48,9 +50,13 @@ Log structured fields:
 
 Do not log provider API keys, bearer tokens, authorization headers, raw full prompts, or raw full responses by default.
 
+Internal configuration identifiers, such as internal model ids, provider model ids, provider config keys, and secret env var names, belong in structured diagnostic logs only when useful for operators and must still follow redaction rules. They must not be copied into public error messages.
+
 ## Error Handling
 
 Normalize failures into OpenAI-compatible error envelopes where possible. Preserve enough internal detail in logs to debug provider failures, but keep public messages stable and non-sensitive.
+
+For `internal_error`/500 responses, use generic public messages. Do not include unresolved internal model ids, provider model ids, provider config keys, env var names, stack traces, or registry details in the `OpenAiHttpError` message that reaches `error.toBody()`.
 
 Use appropriate status codes:
 
@@ -64,6 +70,14 @@ Use appropriate status codes:
 - 503 provider unavailable;
 - 500 internal error.
 
+Do not classify gateway configuration or wiring defects as provider failures. Use `internal_error`/500 when the gateway cannot resolve an internal model or provider before making an upstream call.
+
+## Runtime And Cost Guardrails
+
+- Declare the supported Node.js engine range when dependencies require a specific runtime.
+- Enforce payload, message count, message content, timeout, and delegation limits in backend code, not only in prompts.
+- Prefer real cancellation for in-flight parallel provider/delegate work after terminal failure; if cancellation is not implemented, make the residual cost behavior explicit and covered by tests.
+
 ## Health Checks
 
 Provide:
@@ -75,4 +89,6 @@ Do not perform paid provider calls from health checks by default.
 
 ## Testing
 
-Add tests for redaction, request id propagation, auth rejection, payload limits, timeout mapping, provider error mapping, and health endpoint behavior.
+Add tests for redaction, request id propagation, auth rejection, payload limits, failed-request logging before route resolution, timeout mapping, provider error mapping, internal configuration error mapping, cancellation or ignored-late-result behavior, and health endpoint behavior.
+
+When an internal configuration error needs diagnostic context, test both sides of the boundary: structured logs may contain the useful internal identifier after redaction policy, while the public OpenAI-compatible error body must remain generic and must not expose the internal identifier.

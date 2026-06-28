@@ -9,6 +9,7 @@ import {
   LlmStreamChunk,
 } from "../src/orchestration/llm-generation.port";
 import { GatewayConfigService } from "../src/config/gateway-config.service";
+import { OpenAiHttpError } from "../src/errors/openai-http-error";
 import { minimalConfig, validEnv } from "./support/gateway-config.fixture";
 
 describe("OpenRouter provider adapter", () => {
@@ -53,6 +54,30 @@ describe("OpenRouter provider adapter", () => {
       providerOptions: {
         openrouter: {},
       },
+    });
+  });
+
+  it("passes abort signals through to OpenRouter generate calls", async () => {
+    const sdk = createFakeSdk({
+      text: "provider answer",
+      finishReason: "stop",
+      totalUsage: usage(4, 6, 10),
+    });
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+    const abortController = new AbortController();
+
+    await adapter.generate(
+      config.getProvider("openrouter")!,
+      config.findInternalModel("worker.fast")!,
+      {
+        ...createGenerateRequest("worker.fast"),
+        abortSignal: abortController.signal,
+      },
+    );
+
+    expect(sdk.generateTextCalls[0]).toMatchObject({
+      abortSignal: abortController.signal,
     });
   });
 
@@ -125,6 +150,86 @@ describe("OpenRouter provider adapter", () => {
       },
     ]);
     expect(result.finishReason).toBe("tool_calls");
+  });
+
+  it("preserves valid provider-supplied delegate messages", async () => {
+    const sdk = createFakeSdk({
+      text: "",
+      finishReason: "tool-calls",
+      toolCalls: [
+        {
+          toolCallId: "call_1",
+          toolName: "delegate_llm",
+          input: {
+            target_model: "worker.fast",
+            task: "draft",
+            messages: [
+              { role: "system", content: "client context" },
+              { role: "user", content: "write the draft" },
+              { role: "assistant", content: null, name: "assistant_alias" },
+              { role: "tool", content: "tool result", tool_call_id: "tool_1" },
+            ],
+          },
+        },
+      ],
+      totalUsage: usage(1, 1, 2),
+    });
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+
+    const result = await adapter.generate(
+      config.getProvider("openrouter")!,
+      config.findInternalModel("orchestrator.default")!,
+      createGenerateRequest("orchestrator.default"),
+    );
+
+    expect(result.toolCalls?.[0].arguments.messages).toEqual([
+      { role: "system", content: "client context" },
+      { role: "user", content: "write the draft" },
+      { role: "assistant", content: null, name: "assistant_alias" },
+      { role: "tool", content: "tool result", tool_call_id: "tool_1" },
+    ]);
+  });
+
+  it("omits malformed provider-supplied delegate messages", async () => {
+    const sdk = createFakeSdk({
+      text: "",
+      finishReason: "tool-calls",
+      toolCalls: [
+        {
+          toolCallId: "call_1",
+          toolName: "delegate_llm",
+          input: {
+            target_model: "worker.fast",
+            task: "draft",
+            messages: [
+              { role: "user", content: "valid first message" },
+              { role: "developer", content: "unsupported role" },
+            ],
+          },
+        },
+      ],
+      totalUsage: usage(1, 1, 2),
+    });
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+
+    const result = await adapter.generate(
+      config.getProvider("openrouter")!,
+      config.findInternalModel("orchestrator.default")!,
+      createGenerateRequest("orchestrator.default"),
+    );
+
+    expect(result.toolCalls).toEqual([
+      {
+        id: "call_1",
+        name: "delegate_llm",
+        arguments: {
+          target_model: "worker.fast",
+          task: "draft",
+        },
+      },
+    ]);
   });
 
   it("registers the internal delegate_llm tool with the AI SDK when requested", async () => {
@@ -272,6 +377,35 @@ describe("OpenRouter provider adapter", () => {
     });
   });
 
+  it("passes abort signals through to OpenRouter stream calls", async () => {
+    const sdk = createFakeSdk({
+      text: "unused",
+      finishReason: "stop",
+      totalUsage: usage(0, 0, 0),
+      streamChunks: ["hello"],
+      streamFinishReason: "stop",
+      streamUsage: usage(1, 1, 2),
+    });
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+    const abortController = new AbortController();
+
+    for await (const chunk of adapter.stream(
+      config.getProvider("openrouter")!,
+      config.findInternalModel("worker.fast")!,
+      {
+        ...createGenerateRequest("worker.fast"),
+        abortSignal: abortController.signal,
+      },
+    )) {
+      void chunk;
+    }
+
+    expect(sdk.streamTextCalls[0]).toMatchObject({
+      abortSignal: abortController.signal,
+    });
+  });
+
   it("moves client system messages into the AI SDK system option for streams", async () => {
     const sdk = createFakeSdk({
       text: "unused",
@@ -399,6 +533,48 @@ describe("OpenRouter provider adapter", () => {
     expect(sdk.chatModelIds).toEqual(["openai/gpt-4.1-mini"]);
   });
 
+  it("maps unresolved internal models to internal errors before generate provider calls", async () => {
+    const sdk = createFakeSdk({
+      text: "should not be called",
+      finishReason: "stop",
+      totalUsage: usage(0, 0, 0),
+    });
+    const config = createConfig();
+    const port = new ProviderBackedLlmGenerationPort(
+      config,
+      new ProviderRegistry(config, new OpenRouterAdapter(sdk)),
+    );
+
+    await expectInternalModelError(
+      () => port.generate(createGenerateRequest("missing.internal")),
+      "missing.internal",
+    );
+    expect(sdk.generateTextCalls).toHaveLength(0);
+  });
+
+  it("maps unresolved internal models to internal errors before stream provider calls", async () => {
+    const sdk = createFakeSdk({
+      text: "should not be called",
+      finishReason: "stop",
+      totalUsage: usage(0, 0, 0),
+      streamChunks: ["should not stream"],
+    });
+    const config = createConfig();
+    const port = new ProviderBackedLlmGenerationPort(
+      config,
+      new ProviderRegistry(config, new OpenRouterAdapter(sdk)),
+    );
+
+    await expectInternalModelError(async () => {
+      for await (const chunk of port.stream(
+        createGenerateRequest("missing.internal"),
+      )) {
+        void chunk;
+      }
+    }, "missing.internal");
+    expect(sdk.streamTextCalls).toHaveLength(0);
+  });
+
   it("preserves stream finish reason and usage through the provider-backed generation port", async () => {
     const sdk = createFakeSdk({
       text: "unused",
@@ -437,6 +613,39 @@ function createConfig(): GatewayConfigService {
     rawConfig: minimalConfig(),
     env: validEnv(),
   });
+}
+
+async function expectInternalModelError(
+  action: () => Promise<unknown>,
+  internalModelId: string,
+): Promise<void> {
+  let caught: unknown;
+
+  try {
+    await action();
+  } catch (error) {
+    caught = error;
+  }
+
+  expect(caught).toBeInstanceOf(OpenAiHttpError);
+
+  const error = caught as OpenAiHttpError;
+  expect(error).toMatchObject({
+    status: 500,
+    type: "server_error",
+    code: "internal_error",
+  });
+
+  const body = error.toBody();
+  expect(body).toEqual({
+    error: {
+      message: "Configured internal model was not found.",
+      type: "server_error",
+      param: null,
+      code: "internal_error",
+    },
+  });
+  expect(JSON.stringify(body)).not.toContain(internalModelId);
 }
 
 function createGenerateRequest(modelId: string): LlmGenerateRequest {

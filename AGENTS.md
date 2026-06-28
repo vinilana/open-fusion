@@ -17,7 +17,8 @@ Antes de implementar qualquer mudanca relevante, leia nesta ordem:
    - `docs/specs/003-single-json-configuration.md`
    - `docs/specs/004-provider-adapters-openrouter.md`
    - `docs/specs/005-streaming-tools-response-normalization.md`
-   - `docs/specs/006-observability-resilience-security.md`
+   - `docs/specs/006-streaming-final-with-internal-delegations.md`
+   - `docs/specs/007-observability-resilience-security.md`
 3. Os ADRs referenciados pela spec.
 4. Os testes existentes da area afetada.
 5. O codigo existente, quando houver.
@@ -156,4 +157,3 @@ Ao finalizar, informe checks executados, checks nao executados, risco residual e
 - Atualize documentacao junto com codigo quando o comportamento documentado mudar.
 - Mantenha nomes explicitos e orientados ao dominio.
 - Evite comentarios obvios; comente apenas decisoes ou trechos complexos.
-

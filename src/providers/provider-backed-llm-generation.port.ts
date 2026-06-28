@@ -20,8 +20,8 @@ export class ProviderBackedLlmGenerationPort implements LlmGenerationPort {
   async generate(request: LlmGenerateRequest): Promise<LlmGenerateResult> {
     const model = this.config.findInternalModel(request.modelId);
     if (!model) {
-      throw OpenAiHttpError.providerError(
-        `Configured model '${request.modelId}' was not found.`,
+      throw OpenAiHttpError.internal(
+        "Configured internal model was not found.",
       );
     }
 
@@ -31,8 +31,8 @@ export class ProviderBackedLlmGenerationPort implements LlmGenerationPort {
   stream(request: LlmGenerateRequest): AsyncIterable<LlmStreamChunk> {
     const model = this.config.findInternalModel(request.modelId);
     if (!model) {
-      throw OpenAiHttpError.providerError(
-        `Configured model '${request.modelId}' was not found.`,
+      throw OpenAiHttpError.internal(
+        "Configured internal model was not found.",
       );
     }
 
