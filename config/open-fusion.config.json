@@ -9,9 +9,7 @@
       {
         "id": "local-dev",
         "tokenEnv": "OPEN_FUSION_DEV_API_KEY",
-        "allowedRoutes": [
-          "default"
-        ]
+        "allowedRoutes": ["default"]
       }
     ]
   },
@@ -31,9 +29,7 @@
       "provider": "openrouter",
       "model": "google/gemini-3.5-flash",
       "role": "orchestrator",
-      "capabilities": [
-        "general"
-      ],
+      "capabilities": ["general"],
       "defaults": {
         "temperature": 0.2
       }
@@ -42,10 +38,7 @@
       "provider": "openrouter",
       "model": "google/gemini-3.5-flash",
       "role": "delegate",
-      "capabilities": [
-        "code",
-        "general"
-      ],
+      "capabilities": ["code", "general"],
       "defaults": {
         "temperature": 0.3
       }
@@ -54,9 +47,7 @@
       "provider": "openrouter",
       "model": "minimax/minimax-m3",
       "role": "delegate",
-      "capabilities": [
-        "plan"
-      ],
+      "capabilities": ["plan"],
       "defaults": {
         "temperature": 0.3
       }
@@ -66,10 +57,7 @@
     "default": {
       "publicModel": "route/default",
       "orchestrator": "orchestrator.default",
-      "allowedDelegateModels": [
-        "worker.fast",
-        "worker.plan"
-      ],
+      "allowedDelegateModels": ["worker.fast", "worker.plan"],
       "maxDelegations": 3,
       "maxDepth": 1,
       "timeoutMs": 60000,
@@ -83,10 +71,6 @@
   },
   "observability": {
     "logLevel": "info",
-    "redact": [
-      "apiKey",
-      "token",
-      "authorization"
-    ]
+    "redact": ["apiKey", "token", "authorization"]
   }
 }
