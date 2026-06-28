@@ -945,6 +945,7 @@ function classifyRequestCapability(
   request: ChatCompletionRequest,
 ): CapabilityClassification {
   const content = request.messages
+    .filter((message) => message.role === "user")
     .map((message) => message.content ?? "")
     .join("\n")
     .toLowerCase();
@@ -980,8 +981,6 @@ function matchesCapability(
       "python",
       "javascript",
       "typescript",
-      "html",
-      "css",
       "sql",
       "bash",
       "shell",
