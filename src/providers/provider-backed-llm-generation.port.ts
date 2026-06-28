@@ -21,7 +21,7 @@ export class ProviderBackedLlmGenerationPort implements LlmGenerationPort {
     const model = this.config.findInternalModel(request.modelId);
     if (!model) {
       throw OpenAiHttpError.internal(
-        `Configured model '${request.modelId}' was not found.`,
+        "Configured internal model was not found.",
       );
     }
 
