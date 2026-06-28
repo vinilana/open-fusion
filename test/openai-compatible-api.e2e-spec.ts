@@ -11,7 +11,9 @@ import {
   LlmGenerateRequest,
   LlmGenerateResult,
   LlmGenerationPort,
+  LlmRoutingDecisionRequest,
   LlmStreamChunk,
+  RoutingDecision,
 } from "../src/orchestration/llm-generation.port";
 import { StubLlmGenerationPort } from "../src/orchestration/stub-llm-generation.port";
 import {
@@ -645,7 +647,39 @@ function restoreProcessEnv(previousEnv: NodeJS.ProcessEnv): void {
   Object.assign(process.env, previousEnv);
 }
 
+function createRoutingDecision(input: {
+  targetModel: string;
+  matchedCapability: string;
+  preFinalTasks?: RoutingDecision["pre_final_tasks"];
+}): RoutingDecision {
+  return {
+    final_target: {
+      type: "delegate",
+      target_model: input.targetModel,
+      matched_capability: input.matchedCapability,
+      reason: "Selected by the e2e fake routing decision.",
+    },
+    pre_final_tasks: input.preFinalTasks ?? [],
+  };
+}
+
+function firstDelegateRoutingDecision(
+  request: LlmRoutingDecisionRequest,
+): RoutingDecision {
+  const delegate = request.delegateModels[0];
+  return createRoutingDecision({
+    targetModel: delegate.id,
+    matchedCapability: delegate.capabilities[0] ?? "general",
+  });
+}
+
 class FailingBeforeFirstChunkGenerationPort implements LlmGenerationPort {
+  async generateRoutingDecision(): Promise<RoutingDecision> {
+    throw OpenAiHttpError.providerError(
+      "Provider failed before streaming began.",
+    );
+  }
+
   async generate(): Promise<LlmGenerateResult> {
     throw OpenAiHttpError.providerError(
       "Provider failed before streaming began.",
@@ -664,6 +698,12 @@ class FailingBeforeFirstChunkGenerationPort implements LlmGenerationPort {
 }
 
 class DelegatingStreamGenerationPort implements LlmGenerationPort {
+  async generateRoutingDecision(
+    request: LlmRoutingDecisionRequest,
+  ): Promise<RoutingDecision> {
+    return firstDelegateRoutingDecision(request);
+  }
+
   async generate(): Promise<LlmGenerateResult> {
     return {
       content: "",
@@ -712,6 +752,13 @@ class DelegatingStreamGenerationPort implements LlmGenerationPort {
 }
 
 class CodingFallbackGenerationPort implements LlmGenerationPort {
+  async generateRoutingDecision(): Promise<RoutingDecision> {
+    return createRoutingDecision({
+      targetModel: "worker.fast",
+      matchedCapability: "code",
+    });
+  }
+
   async generate(): Promise<LlmGenerateResult> {
     return {
       content: "orchestrator direct answer must not be streamed",
@@ -746,6 +793,29 @@ class CodingFallbackGenerationPort implements LlmGenerationPort {
 }
 
 class PreFinalTraceGenerationPort implements LlmGenerationPort {
+  async generateRoutingDecision(): Promise<RoutingDecision> {
+    return createRoutingDecision({
+      targetModel: "worker.fast",
+      matchedCapability: "general",
+      preFinalTasks: [
+        {
+          task_id: "context",
+          target_model: "worker.fast",
+          matched_capability: "general",
+          task: "collect private context",
+          depends_on: [],
+        },
+        {
+          task_id: "audit",
+          target_model: "worker.fast",
+          matched_capability: "general",
+          task: "collect private audit",
+          depends_on: [],
+        },
+      ],
+    });
+  }
+
   async generate(request: LlmGenerateRequest): Promise<LlmGenerateResult> {
     if (request.role === "orchestrator") {
       return {
@@ -815,6 +885,12 @@ class PreFinalTraceGenerationPort implements LlmGenerationPort {
 
 class FailingAfterFirstChunkGenerationPort implements LlmGenerationPort {
   private generateCalls = 0;
+
+  async generateRoutingDecision(
+    request: LlmRoutingDecisionRequest,
+  ): Promise<RoutingDecision> {
+    return firstDelegateRoutingDecision(request);
+  }
 
   async generate(): Promise<LlmGenerateResult> {
     this.generateCalls += 1;

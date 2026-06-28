@@ -32,6 +32,7 @@ describe("GatewayConfigService", () => {
         orchestrator: "orchestrator.default",
         allowedDelegateModels: ["worker.fast"],
         allowClientTools: false,
+        allowOrchestratorFallback: true,
       });
       expect(JSON.stringify(config.listPublicModels())).not.toContain(
         "sk-openrouter",
@@ -52,6 +53,20 @@ describe("GatewayConfigService", () => {
 
     expect(config.resolveRouteByPublicModel("route/default")).toMatchObject({
       allowClientTools: true,
+    });
+  });
+
+  it("allows routes to opt out of orchestrator fallback", () => {
+    const rawConfig = minimalConfig();
+    rawConfig.routes.default.allowOrchestratorFallback = false;
+
+    const config = new GatewayConfigService({
+      rawConfig,
+      env: validEnv(),
+    });
+
+    expect(config.resolveRouteByPublicModel("route/default")).toMatchObject({
+      allowOrchestratorFallback: false,
     });
   });
 
@@ -296,6 +311,25 @@ describe("GatewayConfigService", () => {
             env: validEnv(),
           }),
         "routes.default.allowClientTools",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("rejects non-boolean orchestrator fallback route policy", () => {
+    const config = minimalConfig();
+    config.routes.default.allowOrchestratorFallback =
+      "yes" as unknown as boolean;
+    const { path, cleanup } = writeConfig(config);
+    try {
+      expectConfigErrorAt(
+        () =>
+          new GatewayConfigService({
+            configPath: path,
+            env: validEnv(),
+          }),
+        "routes.default.allowOrchestratorFallback",
       );
     } finally {
       cleanup();

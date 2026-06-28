@@ -47,6 +47,7 @@ export interface RawGatewayConfig {
       delegateTimeoutMs: number;
       streamFinalOnly: boolean;
       allowClientTools?: boolean;
+      allowOrchestratorFallback?: boolean;
       maxMessages?: number;
       maxMessageContentLength?: number;
       maxPayloadBytes?: number;
@@ -100,6 +101,7 @@ export interface RouteConfig {
   delegateTimeoutMs: number;
   streamFinalOnly: boolean;
   allowClientTools: boolean;
+  allowOrchestratorFallback: boolean;
   maxMessages: number;
   maxMessageContentLength: number;
   maxPayloadBytes: number;
@@ -567,6 +569,15 @@ function validateRoutes(
         "must be a boolean",
       );
     }
+    if (
+      route.allowOrchestratorFallback !== undefined &&
+      typeof route.allowOrchestratorFallback !== "boolean"
+    ) {
+      throw new GatewayConfigError(
+        `routes.${id}.allowOrchestratorFallback`,
+        "must be a boolean",
+      );
+    }
 
     return {
       id,
@@ -579,6 +590,7 @@ function validateRoutes(
       delegateTimeoutMs: route.delegateTimeoutMs,
       streamFinalOnly: route.streamFinalOnly,
       allowClientTools: route.allowClientTools === true,
+      allowOrchestratorFallback: route.allowOrchestratorFallback !== false,
       maxMessages,
       maxMessageContentLength,
       maxPayloadBytes,

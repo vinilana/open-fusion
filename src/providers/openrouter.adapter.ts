@@ -27,8 +27,7 @@ import {
   LlmUsage,
   ROUTING_DECISION_JSON_SCHEMA,
   RoutingDecision,
-  RoutingDecisionFinalTarget,
-  RoutingDecisionPreFinalTask,
+  normalizeRoutingDecision,
 } from "../orchestration/llm-generation.port";
 import { ChatCompletionMessage } from "../v1/openai-types";
 import { ProviderAdapter } from "./provider-adapter";
@@ -279,7 +278,7 @@ function createOpenRouterProviderFactory(
 function validateRoutingDecision(
   value: unknown,
 ): RoutingDecisionValidationResult {
-  const decision = toRoutingDecision(value);
+  const decision = normalizeRoutingDecision(value);
 
   return decision
     ? {
@@ -290,137 +289,6 @@ function validateRoutingDecision(
         success: false,
         error: new Error("Malformed routing decision."),
       };
-}
-
-function toRoutingDecision(value: unknown): RoutingDecision | undefined {
-  if (
-    !isRecord(value) ||
-    !hasOnlyKeys(value, ["final_target", "pre_final_tasks"])
-  ) {
-    return undefined;
-  }
-
-  const finalTarget = toRoutingDecisionFinalTarget(value.final_target);
-  if (!finalTarget) {
-    return undefined;
-  }
-
-  const decision: RoutingDecision = {
-    final_target: finalTarget,
-  };
-  if ("pre_final_tasks" in value) {
-    const tasks = toRoutingDecisionPreFinalTasks(value.pre_final_tasks);
-    if (!tasks) {
-      return undefined;
-    }
-    decision.pre_final_tasks = tasks;
-  }
-
-  return decision;
-}
-
-function toRoutingDecisionFinalTarget(
-  value: unknown,
-): RoutingDecisionFinalTarget | undefined {
-  if (!isRecord(value) || typeof value.type !== "string") {
-    return undefined;
-  }
-
-  if (value.type === "delegate") {
-    if (
-      !hasOnlyKeys(value, [
-        "type",
-        "target_model",
-        "matched_capability",
-        "reason",
-      ]) ||
-      !isNonEmptyString(value.target_model) ||
-      !isNonEmptyString(value.matched_capability) ||
-      !isOptionalNonEmptyString(value.reason)
-    ) {
-      return undefined;
-    }
-
-    const target: RoutingDecisionFinalTarget = {
-      type: "delegate",
-      target_model: value.target_model,
-      matched_capability: value.matched_capability,
-    };
-    if (typeof value.reason === "string") {
-      target.reason = value.reason;
-    }
-
-    return target;
-  }
-
-  if (value.type === "orchestrator_fallback") {
-    if (
-      !hasOnlyKeys(value, ["type", "reason"]) ||
-      !isOptionalNonEmptyString(value.reason)
-    ) {
-      return undefined;
-    }
-
-    const target: RoutingDecisionFinalTarget = {
-      type: "orchestrator_fallback",
-    };
-    if (typeof value.reason === "string") {
-      target.reason = value.reason;
-    }
-
-    return target;
-  }
-
-  return undefined;
-}
-
-function toRoutingDecisionPreFinalTasks(
-  value: unknown,
-): RoutingDecisionPreFinalTask[] | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-
-  const tasks: RoutingDecisionPreFinalTask[] = [];
-  for (const item of value) {
-    const task = toRoutingDecisionPreFinalTask(item);
-    if (!task) {
-      return undefined;
-    }
-    tasks.push(task);
-  }
-
-  return tasks;
-}
-
-function toRoutingDecisionPreFinalTask(
-  value: unknown,
-): RoutingDecisionPreFinalTask | undefined {
-  if (
-    !isRecord(value) ||
-    !hasOnlyKeys(value, [
-      "task_id",
-      "target_model",
-      "matched_capability",
-      "task",
-      "depends_on",
-    ]) ||
-    !isNonEmptyString(value.task_id) ||
-    !isNonEmptyString(value.target_model) ||
-    !isNonEmptyString(value.matched_capability) ||
-    !isNonEmptyString(value.task) ||
-    !isNonEmptyStringArray(value.depends_on)
-  ) {
-    return undefined;
-  }
-
-  return {
-    task_id: value.task_id,
-    target_model: value.target_model,
-    matched_capability: value.matched_capability,
-    task: value.task,
-    depends_on: value.depends_on,
-  };
 }
 
 function toInternalToolsOption(
@@ -728,25 +596,6 @@ function toStringArray(value: unknown): string[] | undefined {
   }
 
   return value.filter((item): item is string => typeof item === "string");
-}
-
-function hasOnlyKeys(
-  value: Record<string, unknown>,
-  allowedKeys: string[],
-): boolean {
-  return Object.keys(value).every((key) => allowedKeys.includes(key));
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
-}
-
-function isOptionalNonEmptyString(value: unknown): boolean {
-  return value === undefined || isNonEmptyString(value);
-}
-
-function isNonEmptyStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every(isNonEmptyString);
 }
 
 function toUsage(usage: OpenRouterUsage | undefined): LlmUsage {

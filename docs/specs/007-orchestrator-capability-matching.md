@@ -24,7 +24,7 @@ Esta spec governa a mudanca incremental apos a Spec 006. Ela nao reescreve a Spe
 - Match de capability: decisao semantica que relaciona a requisicao atual a uma ou mais capabilities declaradas por modelos permitidos.
 - Decisao de roteamento: saida estruturada do orquestrador indicando alvo final, tasks internas opcionais, dependencies e justificativa operacional.
 - Validacao mecanica: checagem feita pelo backend sem interpretar a intencao do usuario, como confirmar que o modelo existe, esta permitido na rota e declara a capability escolhida pelo orquestrador.
-- `orchestrator_fallback`: alvo final explicito que usa o modelo orquestrador da rota quando a propria decisao de roteamento indicar que nenhum delegado permitido e adequado e a politica da rota permitir fallback.
+- `orchestrator_fallback`: alvo final explicito que usa o modelo orquestrador da rota quando a propria decisao de roteamento indicar que nenhum delegado permitido e adequado e `allowOrchestratorFallback` nao estiver desabilitado pela rota.
 
 ## Principios
 
@@ -44,7 +44,7 @@ Antes de chamar o orquestrador para roteamento, o backend deve montar um catalog
 - capabilities declaradas por cada delegado;
 - limites da rota (`maxDelegations`, `maxDepth`, `timeoutMs`, `delegateTimeoutMs`);
 - politica de streaming final;
-- regras de fallback permitidas;
+- politica `allowOrchestratorFallback` para indicar se a rota permite `orchestrator_fallback`; campo ausente equivale a `true`;
 - restricoes de seguranca e formato esperado para a decisao.
 
 O catalogo nao deve incluir provider API keys, bearer tokens, headers sensiveis, provider model ids quando nao forem necessarios para a decisao, ou modelos que nao estejam permitidos na rota ativa.
@@ -89,7 +89,7 @@ Regras do contrato:
 - `matched_capability` deve existir nas capabilities declaradas do `target_model`.
 - `pre_final_tasks`, quando existirem, tambem devem indicar `target_model`, `matched_capability`, `task_id`, `task` e dependencies validas.
 - `reason` e metadados de diagnostico sao internos e nao podem ser enviados ao cliente por default.
-- `orchestrator_fallback` deve ser uma escolha explicita do orquestrador e so pode ser aceito quando a politica da rota permitir esse caminho.
+- `orchestrator_fallback` deve ser uma escolha explicita do orquestrador e so pode ser aceito quando `allowOrchestratorFallback` estiver habilitado na rota. A ausencia desse campo na configuracao da rota habilita fallback por default.
 - campos desconhecidos, tipos incorretos, arrays fora de limite, strings vazias em campos obrigatorios ou `depends_on` nao resolvivel devem invalidar a decisao antes de qualquer provider call delegada.
 
 ## Onde tratar a resposta estruturada
@@ -175,7 +175,7 @@ Parsing de texto livre, regex, remocao de code fences ou `JSON.parse` sobre cont
 - Modelo/provider sem suporte a objeto estruturado ou tool call obrigatoria: considerar a rota incapaz de executar match por orquestrador e retornar erro de configuracao/roteamento antes de SSE.
 - `target_model` fora de `allowedDelegateModels`: bloquear antes de provider call.
 - `matched_capability` nao declarada pelo modelo escolhido: bloquear ou pedir reparo ao orquestrador; nao escolher outro modelo por codigo.
-- `orchestrator_fallback` nao permitido pela rota: bloquear antes de provider call.
+- `orchestrator_fallback` nao permitido por `allowOrchestratorFallback: false`: bloquear antes de provider call.
 - Grafo com ciclos, dependencies ausentes, mais de um alvo final, recursao ou excesso de limites: rejeitar antes de SSE.
 - Timeout durante roteamento ou reparo: retornar erro normalizado antes de SSE.
 - Provider failure no stream final: fechar SSE de forma controlada e registrar falha sem prompts, respostas completas ou segredos.
@@ -189,7 +189,7 @@ Parsing de texto livre, regex, remocao de code fences ou `JSON.parse` sobre cont
 - Quando dois delegados declaram a mesma capability, a escolha do orquestrador e respeitada se passar na validacao mecanica.
 - Quando o orquestrador escolhe modelo permitido mas capability nao declarada por esse modelo, o backend bloqueia ou pede reparo, sem autocorrecao local para outro delegado.
 - Rotas de routed streaming nao falham no boot apenas por nao terem delegado `general`, salvo politica explicita que exija isso.
-- `orchestrator_fallback` so e usado quando escolhido explicitamente pelo orquestrador e permitido pela rota.
+- `orchestrator_fallback` so e usado quando escolhido explicitamente pelo orquestrador e permitido por `allowOrchestratorFallback` habilitado ou ausente.
 - Nenhum chunk SSE contem decisao de roteamento, capabilities internas, tool calls, grafo, prompts operacionais ou resultados delegados brutos.
 - Guardrails existentes de `allowedDelegateModels`, `maxDelegations`, `maxDepth`, timeouts, provider errors e normalizacao OpenAI-compatible continuam aplicados.
 

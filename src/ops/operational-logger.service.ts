@@ -52,18 +52,13 @@ export interface LlmInvocationLogEvent {
 
 export interface RoutingLogEvent {
   event:
-    | "routing.classified"
     | "routing.execution_graph.validated"
     | "routing.execution_graph.executed";
   requestId: string;
   routeId: string;
   publicModel: string;
-  classifiedCapability?: string;
-  classificationMethod?: string;
-  classificationConfidence?: number;
   finalTargetType?: "delegate" | "orchestrator_fallback";
   finalTargetModel?: string;
-  missingCapability?: string;
   preFinalTaskCount?: number;
   dependencyCount?: number;
   delegationAttemptCount?: number;

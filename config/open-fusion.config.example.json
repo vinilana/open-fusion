@@ -57,6 +57,7 @@
       "maxMessageContentLength": 32768,
       "maxPayloadBytes": 1048576,
       "streamFinalOnly": true,
+      "allowOrchestratorFallback": true,
       "allowClientTools": false
     }
   },
