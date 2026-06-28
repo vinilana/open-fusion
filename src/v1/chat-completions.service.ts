@@ -2,8 +2,12 @@ import { randomUUID } from "node:crypto";
 
 import { Injectable } from "@nestjs/common";
 
-import { GatewayConfigService } from "../config/gateway-config.service";
+import {
+  GatewayConfigService,
+  RouteConfig,
+} from "../config/gateway-config.service";
 import { OpenAiHttpError } from "../errors/openai-http-error";
+import { LlmFinishReason } from "../orchestration/llm-generation.port";
 import { OrchestrationService } from "../orchestration/orchestration.service";
 import {
   ChatCompletionChunk,
@@ -16,6 +20,16 @@ interface AuthenticatedClient {
   allowedModels: string[];
 }
 
+export interface ChatCompletionRequestContext {
+  requestId: string;
+  routeId: string;
+  publicModel: string;
+  orchestrator: string;
+  streamFinalOnly: boolean;
+  stream: boolean;
+  request: ChatCompletionRequest;
+}
+
 @Injectable()
 export class ChatCompletionsService {
   constructor(
@@ -23,20 +37,48 @@ export class ChatCompletionsService {
     private readonly orchestration: OrchestrationService,
   ) {}
 
+  createRequestContext(
+    body: unknown,
+    client: AuthenticatedClient,
+    requestId: string,
+  ): ChatCompletionRequestContext {
+    const request = this.validate(body);
+    const route = this.assertModelAccess(request.model, client);
+    this.assertClientToolsAllowed(request, route);
+
+    return {
+      requestId,
+      routeId: route.id,
+      publicModel: request.model,
+      orchestrator: route.orchestrator,
+      streamFinalOnly: route.streamFinalOnly,
+      stream: request.stream === true,
+      request,
+    };
+  }
+
   async complete(
     body: unknown,
     client: AuthenticatedClient,
   ): Promise<ChatCompletionResponse> {
-    const request = this.validate(body);
-    this.assertModelAccess(request.model, client);
+    return this.completeRequest(this.createRequestContext(body, client, ""));
+  }
 
-    const orchestration = await this.orchestration.run(request);
+  async completeRequest(
+    context: ChatCompletionRequestContext,
+  ): Promise<ChatCompletionResponse> {
+    const orchestration = await this.orchestration.run(context.request, {
+      requestId: context.requestId,
+      routeId: context.routeId,
+      streamFinalOnly: context.streamFinalOnly,
+      clientTools: context.request.tools,
+    });
     const created = unixTimestamp();
     return {
       id: createCompletionId(),
       object: "chat.completion",
       created,
-      model: request.model,
+      model: context.publicModel,
       choices: [
         {
           index: 0,
@@ -59,44 +101,55 @@ export class ChatCompletionsService {
     body: unknown,
     client: AuthenticatedClient,
   ): Promise<ChatCompletionChunk[]> {
-    const request = this.validate(body);
-    this.assertModelAccess(request.model, client);
+    const chunks: ChatCompletionChunk[] = [];
+    for await (const chunk of this.streamRequest(
+      this.createRequestContext(body, client, ""),
+    )) {
+      chunks.push(chunk);
+    }
+    return chunks;
+  }
 
-    const orchestration = await this.orchestration.run(request);
+  async *streamRequest(
+    context: ChatCompletionRequestContext,
+  ): AsyncIterable<ChatCompletionChunk> {
+    const stream = this.orchestration.streamFinal(context.request, {
+      requestId: context.requestId,
+      routeId: context.routeId,
+      streamFinalOnly: context.streamFinalOnly,
+      clientTools: context.request.tools,
+    });
     const id = createCompletionId();
     const created = unixTimestamp();
+    let roleEmitted = false;
 
-    return [
-      {
+    for await (const chunk of stream) {
+      if (chunk.finishReason !== null) {
+        if (!roleEmitted) {
+          yield createStreamContentChunk(id, created, context.publicModel, "", {
+            includeRole: true,
+          });
+        }
+        yield createStreamFinishChunk(
+          id,
+          created,
+          context.publicModel,
+          chunk.finishReason,
+        );
+        return;
+      }
+
+      yield createStreamContentChunk(
         id,
-        object: "chat.completion.chunk",
         created,
-        model: request.model,
-        choices: [
-          {
-            index: 0,
-            delta: {
-              role: "assistant",
-              content: orchestration.content,
-            },
-            finish_reason: null,
-          },
-        ],
-      },
-      {
-        id,
-        object: "chat.completion.chunk",
-        created,
-        model: request.model,
-        choices: [
-          {
-            index: 0,
-            delta: {},
-            finish_reason: "stop",
-          },
-        ],
-      },
-    ];
+        context.publicModel,
+        chunk.content,
+        { includeRole: !roleEmitted },
+      );
+      roleEmitted = true;
+    }
+
+    yield createStreamFinishChunk(id, created, context.publicModel, "stop");
   }
 
   isStreamingRequest(body: unknown): boolean {
@@ -182,6 +235,9 @@ export class ChatCompletionsService {
     if ("tools" in body && !Array.isArray(body.tools)) {
       throw OpenAiHttpError.invalidRequest("tools must be an array.", "tools");
     }
+    if (Array.isArray(body.tools)) {
+      this.validateClientTools(body.tools);
+    }
 
     if (
       "tool_choice" in body &&
@@ -190,6 +246,12 @@ export class ChatCompletionsService {
     ) {
       throw OpenAiHttpError.invalidRequest(
         "tool_choice must be a string or an object.",
+        "tool_choice",
+      );
+    }
+    if (this.referencesInternalDelegateTool(body.tool_choice)) {
+      throw OpenAiHttpError.invalidRequest(
+        "delegate_llm is an internal tool and cannot be supplied by the client.",
         "tool_choice",
       );
     }
@@ -224,10 +286,44 @@ export class ChatCompletionsService {
     }
   }
 
+  private validateClientTools(tools: unknown[]): void {
+    for (const [index, tool] of tools.entries()) {
+      if (!isRecord(tool)) {
+        throw OpenAiHttpError.invalidRequest(
+          `tools[${index}] must be an object.`,
+          "tools",
+        );
+      }
+
+      if (this.referencesInternalDelegateTool(tool)) {
+        throw OpenAiHttpError.invalidRequest(
+          "delegate_llm is an internal tool and cannot be supplied by the client.",
+          "tools",
+        );
+      }
+    }
+  }
+
+  private referencesInternalDelegateTool(value: unknown): boolean {
+    if (!isRecord(value)) {
+      return false;
+    }
+
+    if (value.name === "delegate_llm") {
+      return true;
+    }
+
+    if (isRecord(value.function) && value.function.name === "delegate_llm") {
+      return true;
+    }
+
+    return false;
+  }
+
   private assertModelAccess(
     modelId: string,
     client: AuthenticatedClient,
-  ): void {
+  ): RouteConfig {
     const model = this.config.findPublicModel(modelId);
     if (!model) {
       throw OpenAiHttpError.modelNotFound(modelId);
@@ -235,6 +331,29 @@ export class ChatCompletionsService {
 
     if (!client.allowedModels.includes(model.id)) {
       throw OpenAiHttpError.forbidden(modelId);
+    }
+
+    const route = this.config.resolveRouteByPublicModel(modelId);
+    if (!route) {
+      throw OpenAiHttpError.modelNotFound(modelId);
+    }
+
+    return route;
+  }
+
+  private assertClientToolsAllowed(
+    request: ChatCompletionRequest,
+    route: RouteConfig,
+  ): void {
+    if (
+      request.tools !== undefined &&
+      request.tools.length > 0 &&
+      !route.allowClientTools
+    ) {
+      throw OpenAiHttpError.invalidRequest(
+        `Client tools are not enabled for route '${route.id}'.`,
+        "tools",
+      );
     }
   }
 }
@@ -245,6 +364,52 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function unixTimestamp(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+function createStreamContentChunk(
+  id: string,
+  created: number,
+  model: string,
+  content: string,
+  options: { includeRole: boolean },
+): ChatCompletionChunk {
+  return {
+    id,
+    object: "chat.completion.chunk",
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: {
+          ...(options.includeRole ? { role: "assistant" as const } : {}),
+          content,
+        },
+        finish_reason: null,
+      },
+    ],
+  };
+}
+
+function createStreamFinishChunk(
+  id: string,
+  created: number,
+  model: string,
+  finishReason: LlmFinishReason,
+): ChatCompletionChunk {
+  return {
+    id,
+    object: "chat.completion.chunk",
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: {},
+        finish_reason: finishReason,
+      },
+    ],
+  };
 }
 
 function createCompletionId(): string {

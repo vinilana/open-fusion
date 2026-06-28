@@ -8,6 +8,7 @@ import { OpenAiHttpError } from "../errors/openai-http-error";
 import {
   LlmGenerateRequest,
   LlmGenerateResult,
+  LlmStreamChunk,
 } from "../orchestration/llm-generation.port";
 import { OpenRouterAdapter } from "./openrouter.adapter";
 
@@ -35,6 +36,26 @@ export class ProviderRegistry {
 
     throw OpenAiHttpError.providerError(
       `Provider type '${provider.type}' is not supported.`,
+    );
+  }
+
+  stream(
+    model: InternalModelConfig,
+    request: LlmGenerateRequest,
+  ): AsyncIterable<LlmStreamChunk> {
+    const provider = this.config.getProvider(model.provider);
+    if (!provider) {
+      throw OpenAiHttpError.providerError(
+        `Provider '${model.provider}' is not configured.`,
+      );
+    }
+
+    if (provider.type === this.openRouter.type && this.openRouter.stream) {
+      return this.openRouter.stream(provider, model, request);
+    }
+
+    throw OpenAiHttpError.providerError(
+      `Provider type '${provider.type}' does not support streaming.`,
     );
   }
 }

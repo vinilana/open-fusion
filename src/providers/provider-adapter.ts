@@ -5,6 +5,7 @@ import {
 import {
   LlmGenerateRequest,
   LlmGenerateResult,
+  LlmStreamChunk,
 } from "../orchestration/llm-generation.port";
 
 export interface ProviderAdapter {
@@ -20,5 +21,5 @@ export interface ProviderAdapter {
     provider: ProviderConfig,
     model: InternalModelConfig,
     request: LlmGenerateRequest,
-  ): AsyncIterable<string>;
+  ): AsyncIterable<LlmStreamChunk>;
 }

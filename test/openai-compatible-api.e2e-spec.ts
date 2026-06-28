@@ -3,9 +3,21 @@ import { Test } from "@nestjs/testing";
 import request from "supertest";
 
 import { AppModule } from "../src/app.module";
-import { LLM_GENERATION_PORT } from "../src/orchestration/llm-generation.port";
+import { OpenAiHttpError } from "../src/errors/openai-http-error";
+import { RawGatewayConfig } from "../src/config/gateway-config.service";
+import {
+  LLM_GENERATION_PORT,
+  LlmGenerateRequest,
+  LlmGenerateResult,
+  LlmGenerationPort,
+  LlmStreamChunk,
+} from "../src/orchestration/llm-generation.port";
 import { StubLlmGenerationPort } from "../src/orchestration/stub-llm-generation.port";
-import { validEnv, writeConfig } from "./support/gateway-config.fixture";
+import {
+  minimalConfig,
+  validEnv,
+  writeConfig,
+} from "./support/gateway-config.fixture";
 
 describe("OpenAI-compatible API", () => {
   let app: INestApplication;
@@ -152,6 +164,91 @@ describe("OpenAI-compatible API", () => {
     });
   });
 
+  it("returns a JSON error before opening SSE when a streaming request is invalid", async () => {
+    const response = await request(app.getHttpServer())
+      .post("/v1/chat/completions")
+      .set("Authorization", "Bearer test-gateway-key")
+      .send({
+        model: "internal/not-exposed",
+        stream: true,
+        messages: [{ role: "user", content: "hello" }],
+      })
+      .expect(404);
+
+    expect(response.headers["content-type"]).toContain("application/json");
+    expect(response.body).toEqual({
+      error: {
+        message: "Model 'internal/not-exposed' was not found.",
+        type: "invalid_request_error",
+        param: "model",
+        code: "model_not_found",
+      },
+    });
+  });
+
+  it("rejects attempts to expose the internal delegate_llm tool from the client request", async () => {
+    const response = await request(app.getHttpServer())
+      .post("/v1/chat/completions")
+      .set("Authorization", "Bearer test-gateway-key")
+      .send({
+        model: "route/default",
+        messages: [{ role: "user", content: "hello" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "delegate_llm",
+              description: "attempt to call an internal gateway tool",
+            },
+          },
+        ],
+        tool_choice: {
+          type: "function",
+          function: { name: "delegate_llm" },
+        },
+      })
+      .expect(400);
+
+    expect(response.body).toEqual({
+      error: {
+        message:
+          "delegate_llm is an internal tool and cannot be supplied by the client.",
+        type: "invalid_request_error",
+        param: "tools",
+        code: "invalid_request",
+      },
+    });
+  });
+
+  it("rejects external client tools unless the active route explicitly allows them", async () => {
+    const response = await request(app.getHttpServer())
+      .post("/v1/chat/completions")
+      .set("Authorization", "Bearer test-gateway-key")
+      .send({
+        model: "route/default",
+        messages: [{ role: "user", content: "hello" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "lookup_weather",
+              description: "external tool",
+            },
+          },
+        ],
+      })
+      .expect(400);
+
+    expect(response.body).toEqual({
+      error: {
+        message: "Client tools are not enabled for route 'default'.",
+        type: "invalid_request_error",
+        param: "tools",
+        code: "invalid_request",
+      },
+    });
+  });
+
   it("returns a Chat Completions envelope for non-streaming requests", async () => {
     const response = await request(app.getHttpServer())
       .post("/v1/chat/completions")
@@ -227,6 +324,361 @@ describe("OpenAI-compatible API", () => {
     expect(response.headers["content-type"]).toContain("text/event-stream");
     expect(response.text).toContain('"object":"chat.completion.chunk"');
     expect(response.text).toContain('"delta":{"role":"assistant"');
+    expect(accumulateStreamContent(response.text)).toBe(
+      "Open Fusion received 1 message for route/default.",
+    );
     expect(response.text.trim().endsWith("data: [DONE]")).toBe(true);
   });
+
+  it("streams delegated model output when the orchestrator routes a streaming request", async () => {
+    const delegatedApp = await createAppWithGenerationPort(
+      DelegatingStreamGenerationPort,
+    );
+
+    try {
+      const response = await request(delegatedApp.app.getHttpServer())
+        .post("/v1/chat/completions")
+        .set("Authorization", "Bearer test-gateway-key")
+        .send({
+          model: "route/default",
+          stream: true,
+          messages: [{ role: "user", content: "route this request" }],
+        })
+        .expect(200);
+
+      expect(response.headers["content-type"]).toContain("text/event-stream");
+      expect(accumulateStreamContent(response.text)).toBe(
+        "delegated streamed answer",
+      );
+      expect(response.text).not.toContain("delegate_llm");
+      expect(response.text.trim().endsWith("data: [DONE]")).toBe(true);
+    } finally {
+      await delegatedApp.close();
+    }
+  });
+
+  it("routes coding streaming requests to the coding-capable delegate even when the orchestrator answers directly", async () => {
+    const codingConfig = minimalConfig();
+    codingConfig.models["worker.fast"].capabilities = ["coding"];
+    const delegatedApp = await createAppWithGenerationPort(
+      CodingFallbackGenerationPort,
+      codingConfig,
+    );
+
+    try {
+      const response = await request(delegatedApp.app.getHttpServer())
+        .post("/v1/chat/completions")
+        .set("Authorization", "Bearer test-gateway-key")
+        .send({
+          model: "route/default",
+          stream: true,
+          messages: [
+            {
+              role: "user",
+              content: "faça um codigo python para printar hello world",
+            },
+          ],
+        })
+        .expect(200);
+
+      expect(response.headers["content-type"]).toContain("text/event-stream");
+      expect(accumulateStreamContent(response.text)).toBe(
+        "print('hello world')",
+      );
+      expect(response.text.trim().endsWith("data: [DONE]")).toBe(true);
+    } finally {
+      await delegatedApp.close();
+    }
+  });
+
+  it("returns a JSON error before opening SSE when streaming orchestration fails before the first chunk", async () => {
+    const failingApp = await createAppWithGenerationPort(
+      FailingBeforeFirstChunkGenerationPort,
+    );
+
+    try {
+      const response = await request(failingApp.app.getHttpServer())
+        .post("/v1/chat/completions")
+        .set("Authorization", "Bearer test-gateway-key")
+        .send({
+          model: "route/default",
+          stream: true,
+          messages: [{ role: "user", content: "stream please" }],
+        })
+        .expect(502);
+
+      expect(response.headers["content-type"]).toContain("application/json");
+      expect(response.body).toEqual({
+        error: {
+          message: "Provider failed before streaming began.",
+          type: "provider_error",
+          param: null,
+          code: "provider_error",
+        },
+      });
+      expect(response.text).not.toContain("data:");
+    } finally {
+      await failingApp.close();
+    }
+  });
+
+  it("closes SSE without leaking sensitive details when streaming fails after the first chunk", async () => {
+    const failingApp = await createAppWithGenerationPort(
+      FailingAfterFirstChunkGenerationPort,
+    );
+    const logSpy = jest
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    try {
+      const response = await request(failingApp.app.getHttpServer())
+        .post("/v1/chat/completions")
+        .set("Authorization", "Bearer test-gateway-key")
+        .set("x-request-id", "req-stream-failure-after-sse")
+        .send({
+          model: "route/default",
+          stream: true,
+          messages: [{ role: "user", content: "stream please" }],
+        })
+        .expect(200);
+
+      expect(response.headers["content-type"]).toContain("text/event-stream");
+      expect(response.text).toContain("partial final");
+      expect(response.text.trim().endsWith("data: [DONE]")).toBe(true);
+      expect(response.text).not.toContain("sk-provider-secret");
+      expect(response.text).not.toContain("Provider failed after streaming");
+      expect(response.text).not.toContain("provider_error");
+
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining('"event":"chat_completion.failed"'),
+      );
+      const serializedLogs = logSpy.mock.calls.flat().join("\n");
+      expect(serializedLogs).toContain(
+        '"requestId":"req-stream-failure-after-sse"',
+      );
+      expect(serializedLogs).toContain('"stream":true');
+      expect(serializedLogs).toContain('"status":"error"');
+      expect(serializedLogs).toContain('"type":"provider_error"');
+      expect(serializedLogs).toContain('"code":"provider_error"');
+      expect(serializedLogs).toContain('"status":502');
+      expect(serializedLogs).not.toContain("sk-provider-secret");
+      expect(serializedLogs).not.toContain("Provider failed after streaming");
+    } finally {
+      logSpy.mockRestore();
+      await failingApp.close();
+    }
+  });
+
+  it("logs structured completion metadata without full prompts or responses", async () => {
+    const logSpy = jest
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    await request(app.getHttpServer())
+      .post("/v1/chat/completions")
+      .set("Authorization", "Bearer test-gateway-key")
+      .set("x-request-id", "req-log-001")
+      .send({
+        model: "route/default",
+        messages: [{ role: "user", content: "full prompt must not be logged" }],
+      })
+      .expect(200);
+
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('"event":"chat_completion.completed"'),
+    );
+    const serializedLogs = logSpy.mock.calls.flat().join("\n");
+    expect(serializedLogs).toContain('"requestId":"req-log-001"');
+    expect(serializedLogs).toContain('"publicModel":"route/default"');
+    expect(serializedLogs).not.toContain("full prompt must not be logged");
+    expect(serializedLogs).not.toContain("Open Fusion received");
+
+    logSpy.mockRestore();
+  });
 });
+
+async function createAppWithGenerationPort(
+  generationPort: new () => LlmGenerationPort,
+  rawConfig: RawGatewayConfig = minimalConfig(),
+): Promise<{ app: INestApplication; close: () => Promise<void> }> {
+  const previousEnv = { ...process.env };
+  const config = writeConfig(rawConfig);
+  process.env.OPEN_FUSION_CONFIG = config.path;
+  Object.assign(process.env, validEnv());
+
+  const moduleRef = await Test.createTestingModule({
+    imports: [AppModule],
+  })
+    .overrideProvider(LLM_GENERATION_PORT)
+    .useClass(generationPort)
+    .compile();
+
+  const app = moduleRef.createNestApplication();
+  await app.init();
+
+  return {
+    app,
+    async close() {
+      await app.close();
+      config.cleanup();
+      process.env = previousEnv;
+    },
+  };
+}
+
+class FailingBeforeFirstChunkGenerationPort implements LlmGenerationPort {
+  async generate(): Promise<LlmGenerateResult> {
+    throw OpenAiHttpError.providerError(
+      "Provider failed before streaming began.",
+    );
+  }
+
+  async *stream(): AsyncIterable<LlmStreamChunk> {
+    throw OpenAiHttpError.providerError(
+      "Stream should not start before planning completes.",
+    );
+    yield {
+      content: "",
+      finishReason: "stop",
+    };
+  }
+}
+
+class DelegatingStreamGenerationPort implements LlmGenerationPort {
+  async generate(): Promise<LlmGenerateResult> {
+    return {
+      content: "",
+      finishReason: "tool_calls",
+      toolCalls: [
+        {
+          id: "call_1",
+          name: "delegate_llm",
+          arguments: {
+            target_model: "worker.fast",
+            task: "produce the final streamed answer",
+          },
+        },
+      ],
+      usage: {
+        promptTokens: 1,
+        completionTokens: 2,
+        totalTokens: 3,
+      },
+    };
+  }
+
+  async *stream(request: LlmGenerateRequest): AsyncIterable<LlmStreamChunk> {
+    if (request.modelId !== "worker.fast") {
+      throw OpenAiHttpError.providerError("Expected delegate stream.");
+    }
+
+    yield {
+      content: "delegated ",
+      finishReason: null,
+    };
+    yield {
+      content: "streamed answer",
+      finishReason: null,
+    };
+    yield {
+      content: "",
+      finishReason: "stop",
+      usage: {
+        promptTokens: 4,
+        completionTokens: 5,
+        totalTokens: 9,
+      },
+    };
+  }
+}
+
+class CodingFallbackGenerationPort implements LlmGenerationPort {
+  async generate(): Promise<LlmGenerateResult> {
+    return {
+      content: "orchestrator direct answer must not be streamed",
+      finishReason: "stop",
+      usage: {
+        promptTokens: 1,
+        completionTokens: 2,
+        totalTokens: 3,
+      },
+    };
+  }
+
+  async *stream(request: LlmGenerateRequest): AsyncIterable<LlmStreamChunk> {
+    if (request.modelId !== "worker.fast") {
+      throw OpenAiHttpError.providerError("Expected coding delegate stream.");
+    }
+
+    yield {
+      content: "print('hello world')",
+      finishReason: null,
+    };
+    yield {
+      content: "",
+      finishReason: "stop",
+      usage: {
+        promptTokens: 4,
+        completionTokens: 5,
+        totalTokens: 9,
+      },
+    };
+  }
+}
+
+class FailingAfterFirstChunkGenerationPort implements LlmGenerationPort {
+  private generateCalls = 0;
+
+  async generate(): Promise<LlmGenerateResult> {
+    this.generateCalls += 1;
+
+    if (this.generateCalls === 1) {
+      return {
+        content: "",
+        finishReason: "tool_calls",
+        toolCalls: [
+          {
+            id: "call_1",
+            name: "delegate_llm",
+            arguments: {
+              target_model: "worker.fast",
+              task: "draft before streaming",
+            },
+          },
+        ],
+      };
+    }
+
+    return {
+      content: "delegate draft",
+      finishReason: "stop",
+    };
+  }
+
+  async *stream(): AsyncIterable<LlmStreamChunk> {
+    yield {
+      content: "partial final",
+      finishReason: null,
+    };
+    throw OpenAiHttpError.providerError(
+      "Provider failed after streaming with sk-provider-secret.",
+    );
+  }
+}
+
+function accumulateStreamContent(streamBody: string): string {
+  return streamBody
+    .split("\n\n")
+    .map((event) => event.trim())
+    .filter((event) => event.startsWith("data: "))
+    .map((event) => event.slice("data: ".length))
+    .filter((data) => data !== "[DONE]")
+    .map(
+      (data) =>
+        JSON.parse(data) as {
+          choices?: Array<{ delta?: { content?: string } }>;
+        },
+    )
+    .map((chunk) => chunk.choices?.[0]?.delta?.content ?? "")
+    .join("");
+}

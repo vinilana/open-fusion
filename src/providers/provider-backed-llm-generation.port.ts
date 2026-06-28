@@ -6,6 +6,7 @@ import {
   LlmGenerateRequest,
   LlmGenerateResult,
   LlmGenerationPort,
+  LlmStreamChunk,
 } from "../orchestration/llm-generation.port";
 import { ProviderRegistry } from "./provider-registry";
 
@@ -25,5 +26,16 @@ export class ProviderBackedLlmGenerationPort implements LlmGenerationPort {
     }
 
     return this.providers.generate(model, request);
+  }
+
+  stream(request: LlmGenerateRequest): AsyncIterable<LlmStreamChunk> {
+    const model = this.config.findInternalModel(request.modelId);
+    if (!model) {
+      throw OpenAiHttpError.providerError(
+        `Configured model '${request.modelId}' was not found.`,
+      );
+    }
+
+    return this.providers.stream(model, request);
   }
 }

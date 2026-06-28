@@ -4,7 +4,10 @@ import {
 } from "../src/providers/openrouter.adapter";
 import { ProviderBackedLlmGenerationPort } from "../src/providers/provider-backed-llm-generation.port";
 import { ProviderRegistry } from "../src/providers/provider-registry";
-import { LlmGenerateRequest } from "../src/orchestration/llm-generation.port";
+import {
+  LlmGenerateRequest,
+  LlmStreamChunk,
+} from "../src/orchestration/llm-generation.port";
 import { GatewayConfigService } from "../src/config/gateway-config.service";
 import { minimalConfig, validEnv } from "./support/gateway-config.fixture";
 
@@ -53,6 +56,37 @@ describe("OpenRouter provider adapter", () => {
     });
   });
 
+  it("moves client system messages into the AI SDK system option", async () => {
+    const sdk = createFakeSdk({
+      text: "provider answer",
+      finishReason: "stop",
+      totalUsage: usage(4, 6, 10),
+    });
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+
+    await adapter.generate(
+      config.getProvider("openrouter")!,
+      config.findInternalModel("worker.fast")!,
+      {
+        ...createGenerateRequest("worker.fast"),
+        system: "gateway system",
+        messages: [
+          { role: "system", content: "client system" },
+          { role: "user", content: "hello" },
+        ],
+      },
+    );
+
+    expect(sdk.generateTextCalls[0]).toMatchObject({
+      system: expect.stringContaining("gateway system"),
+      messages: [{ role: "user", content: "hello" }],
+    });
+    expect(sdk.generateTextCalls[0]).toMatchObject({
+      system: expect.stringContaining("client system"),
+    });
+  });
+
   it("maps delegate_llm tool calls from AI SDK results", async () => {
     const sdk = createFakeSdk({
       text: "",
@@ -93,17 +127,127 @@ describe("OpenRouter provider adapter", () => {
     expect(result.finishReason).toBe("tool_calls");
   });
 
+  it("registers the internal delegate_llm tool with the AI SDK when requested", async () => {
+    const sdk = createFakeSdk({
+      text: "unused",
+      finishReason: "stop",
+      totalUsage: usage(0, 0, 0),
+    });
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+
+    await adapter.generate(
+      config.getProvider("openrouter")!,
+      config.findInternalModel("orchestrator.default")!,
+      {
+        ...createGenerateRequest("orchestrator.default"),
+        internalTools: ["delegate_llm"],
+      },
+    );
+
+    const generateOptions = sdk.generateTextCalls[0] as {
+      tools?: {
+        delegate_llm?: {
+          description?: string;
+          inputSchema?: { jsonSchema: unknown };
+        };
+      };
+    };
+    expect(generateOptions.tools).toHaveProperty("delegate_llm");
+    expect(generateOptions.tools?.delegate_llm?.description).toContain(
+      "Delegate",
+    );
+    await expect(
+      Promise.resolve(
+        generateOptions.tools?.delegate_llm?.inputSchema?.jsonSchema,
+      ),
+    ).resolves.toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["target_model", "task"],
+      properties: {
+        target_model: { type: "string" },
+        task: { type: "string" },
+        messages: { type: "array" },
+        output_contract: { type: "string" },
+        reason: { type: "string" },
+      },
+    });
+  });
+
+  it("does not register internal tools for final synthesis generate or stream requests", async () => {
+    const sdk = createFakeSdk({
+      text: "final answer",
+      finishReason: "stop",
+      totalUsage: usage(8, 13, 21),
+      streamChunks: ["final", " answer"],
+      streamFinishReason: "stop",
+      streamUsage: usage(8, 13, 21),
+    });
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+    const finalSynthesisRequest: LlmGenerateRequest = {
+      ...createGenerateRequest("orchestrator.default"),
+      toolResults: [
+        {
+          toolCallId: "call_1",
+          targetModel: "worker.fast",
+          task: "draft",
+          status: "success",
+          content: "delegate result",
+          finishReason: "stop",
+          usage: {
+            promptTokens: 2,
+            completionTokens: 3,
+            totalTokens: 5,
+          },
+          latencyMs: 42,
+          untrusted: true,
+        },
+      ],
+    };
+
+    await adapter.generate(
+      config.getProvider("openrouter")!,
+      config.findInternalModel("orchestrator.default")!,
+      finalSynthesisRequest,
+    );
+
+    const streamChunks: LlmStreamChunk[] = [];
+    for await (const chunk of adapter.stream(
+      config.getProvider("openrouter")!,
+      config.findInternalModel("orchestrator.default")!,
+      finalSynthesisRequest,
+    )) {
+      streamChunks.push(chunk);
+    }
+
+    expect(streamChunks).toEqual([
+      { content: "final", finishReason: null },
+      { content: " answer", finishReason: null },
+      {
+        content: "",
+        finishReason: "stop",
+        usage: { promptTokens: 8, completionTokens: 13, totalTokens: 21 },
+      },
+    ]);
+    expect(sdk.generateTextCalls[0]).not.toHaveProperty("tools");
+    expect(sdk.streamTextCalls[0]).not.toHaveProperty("tools");
+  });
+
   it("streams text chunks through the OpenRouter AI SDK path", async () => {
     const sdk = createFakeSdk({
       text: "unused",
       finishReason: "stop",
       totalUsage: usage(0, 0, 0),
       streamChunks: ["hello", " ", "world"],
+      streamFinishReason: "length",
+      streamUsage: usage(3, 5, 8),
     });
     const adapter = new OpenRouterAdapter(sdk);
     const config = createConfig();
 
-    const chunks: string[] = [];
+    const chunks: LlmStreamChunk[] = [];
     for await (const chunk of adapter.stream(
       config.getProvider("openrouter")!,
       config.findInternalModel("worker.fast")!,
@@ -112,10 +256,57 @@ describe("OpenRouter provider adapter", () => {
       chunks.push(chunk);
     }
 
-    expect(chunks).toEqual(["hello", " ", "world"]);
+    expect(chunks).toEqual([
+      { content: "hello", finishReason: null },
+      { content: " ", finishReason: null },
+      { content: "world", finishReason: null },
+      {
+        content: "",
+        finishReason: "length",
+        usage: { promptTokens: 3, completionTokens: 5, totalTokens: 8 },
+      },
+    ]);
     expect(sdk.streamTextCalls[0]).toMatchObject({
       model: { providerModelId: "openai/gpt-4.1-mini" },
       timeout: 30000,
+    });
+  });
+
+  it("moves client system messages into the AI SDK system option for streams", async () => {
+    const sdk = createFakeSdk({
+      text: "unused",
+      finishReason: "stop",
+      totalUsage: usage(0, 0, 0),
+      streamChunks: ["hello"],
+      streamFinishReason: "content-filter",
+      streamUsage: usage(2, 4, 6),
+    });
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+
+    for await (const chunk of adapter.stream(
+      config.getProvider("openrouter")!,
+      config.findInternalModel("worker.fast")!,
+      {
+        ...createGenerateRequest("worker.fast"),
+        system: "gateway system",
+        messages: [
+          { role: "system", content: "client system" },
+          { role: "user", content: "hello" },
+        ],
+      },
+    )) {
+      if (chunk.finishReason === null) {
+        expect(chunk.content).toBe("hello");
+      }
+    }
+
+    expect(sdk.streamTextCalls[0]).toMatchObject({
+      system: expect.stringContaining("gateway system"),
+      messages: [{ role: "user", content: "hello" }],
+    });
+    expect(sdk.streamTextCalls[0]).toMatchObject({
+      system: expect.stringContaining("client system"),
     });
   });
 
@@ -162,6 +353,38 @@ describe("OpenRouter provider adapter", () => {
 
     expect(result.content).toBe("registry answer");
     expect(sdk.chatModelIds).toEqual(["openai/gpt-4.1-mini"]);
+  });
+
+  it("preserves stream finish reason and usage through the provider-backed generation port", async () => {
+    const sdk = createFakeSdk({
+      text: "unused",
+      finishReason: "stop",
+      totalUsage: usage(0, 0, 0),
+      streamChunks: ["partial"],
+      streamFinishReason: "content-filter",
+      streamUsage: usage(11, 13, 24),
+    });
+    const config = createConfig();
+    const port = new ProviderBackedLlmGenerationPort(
+      config,
+      new ProviderRegistry(config, new OpenRouterAdapter(sdk)),
+    );
+
+    const chunks: LlmStreamChunk[] = [];
+    for await (const chunk of port.stream(
+      createGenerateRequest("worker.fast"),
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { content: "partial", finishReason: null },
+      {
+        content: "",
+        finishReason: "content_filter",
+        usage: { promptTokens: 11, completionTokens: 13, totalTokens: 24 },
+      },
+    ]);
   });
 });
 
@@ -225,6 +448,8 @@ function createFakeSdk(
 
       return {
         textStream: toAsyncIterable(result.streamChunks ?? []),
+        finishReason: Promise.resolve(result.streamFinishReason ?? "stop"),
+        totalUsage: Promise.resolve(result.streamUsage ?? result.totalUsage),
       };
     },
   };
@@ -244,6 +469,12 @@ interface FakeGenerateTextResult {
     input: Record<string, unknown>;
   }>;
   streamChunks?: string[];
+  streamFinishReason?: string;
+  streamUsage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  };
 }
 
 function usage(input: number, output: number, total: number) {

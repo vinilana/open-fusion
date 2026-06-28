@@ -20,6 +20,12 @@ export interface ChatCompletionRequest {
   metadata?: Record<string, unknown>;
 }
 
+export type ChatCompletionFinishReason =
+  | "stop"
+  | "length"
+  | "tool_calls"
+  | "content_filter";
+
 export interface ChatCompletionResponse {
   id: string;
   object: "chat.completion";
@@ -31,7 +37,7 @@ export interface ChatCompletionResponse {
       role: "assistant";
       content: string;
     };
-    finish_reason: "stop";
+    finish_reason: ChatCompletionFinishReason;
   }>;
   usage?: {
     prompt_tokens: number;
@@ -51,7 +57,7 @@ export interface ChatCompletionChunk {
       role?: "assistant";
       content?: string;
     };
-    finish_reason: "stop" | null;
+    finish_reason: ChatCompletionFinishReason | null;
   }>;
 }
 

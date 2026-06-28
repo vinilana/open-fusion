@@ -1,4 +1,4 @@
-# Spec 006: Observabilidade, resiliencia e seguranca
+# Spec 007: Observabilidade, resiliencia e seguranca
 
 ## Status
 
@@ -93,4 +93,3 @@ Nao e requisito inicial armazenar historico em banco.
 - [ADR 0004](../adrs/0004-single-json-configuration.md)
 - [ADR 0005](../adrs/0005-llm-orchestrator-routing.md)
 - [ADR 0007](../adrs/0007-provider-adapter-layer.md)
-

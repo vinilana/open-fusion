@@ -30,5 +30,4 @@ Negativas:
 ## Specs relacionadas
 
 - [Spec 003](../specs/003-single-json-configuration.md)
-- [Spec 006](../specs/006-observability-resilience-security.md)
-
+- [Spec 007](../specs/007-observability-resilience-security.md)
