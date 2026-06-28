@@ -6,7 +6,9 @@ import { ProviderBackedLlmGenerationPort } from "../src/providers/provider-backe
 import { ProviderRegistry } from "../src/providers/provider-registry";
 import {
   LlmGenerateRequest,
+  LlmRoutingDecisionRequest,
   LlmStreamChunk,
+  RoutingDecision,
 } from "../src/orchestration/llm-generation.port";
 import { GatewayConfigService } from "../src/config/gateway-config.service";
 import { OpenAiHttpError } from "../src/errors/openai-http-error";
@@ -112,6 +114,108 @@ describe("OpenRouter provider adapter", () => {
     });
   });
 
+  it("generates routing decisions through AI SDK structured objects", async () => {
+    const routingDecision = createRoutingDecision();
+    const sdk = createFakeSdk({
+      text: "unused",
+      finishReason: "stop",
+      totalUsage: usage(0, 0, 0),
+      object: routingDecision,
+    });
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+
+    const result = await adapter.generateRoutingDecision(
+      config.getProvider("openrouter")!,
+      config.findInternalModel("orchestrator.default")!,
+      createRoutingDecisionRequest("orchestrator.default"),
+    );
+
+    expect(result).toEqual(routingDecision);
+    expect(sdk.generateObjectCalls).toHaveLength(1);
+    expect(sdk.generateTextCalls).toHaveLength(0);
+    expect(sdk.generateObjectCalls[0]).toMatchObject({
+      model: { providerModelId: "openai/gpt-4.1" },
+      messages: [{ role: "user", content: "hello" }],
+      timeout: 30000,
+      temperature: 0.2,
+      providerOptions: {
+        openrouter: {},
+      },
+    });
+
+    const generateObjectOptions = sdk.generateObjectCalls[0] as {
+      schema?: { jsonSchema?: unknown };
+      schemaName?: string;
+      schemaDescription?: string;
+    };
+    expect(generateObjectOptions.schemaName).toBe("routing_decision");
+    expect(generateObjectOptions.schemaDescription).toContain(
+      "routing decision",
+    );
+    await expect(
+      Promise.resolve(generateObjectOptions.schema?.jsonSchema),
+    ).resolves.toMatchObject({
+      type: "object",
+      additionalProperties: false,
+      required: ["final_target"],
+      properties: {
+        final_target: {
+          oneOf: expect.arrayContaining([
+            expect.objectContaining({
+              required: ["type", "target_model", "matched_capability"],
+            }),
+            expect.objectContaining({
+              required: ["type"],
+            }),
+          ]),
+        },
+        pre_final_tasks: {
+          type: "array",
+          items: expect.objectContaining({
+            required: [
+              "task_id",
+              "target_model",
+              "matched_capability",
+              "task",
+              "depends_on",
+            ],
+          }),
+        },
+      },
+    });
+  });
+
+  it("rejects malformed structured routing decision objects from the AI SDK", async () => {
+    const sdk = createFakeSdk({
+      text: "unused",
+      finishReason: "stop",
+      totalUsage: usage(0, 0, 0),
+      object: {
+        final_target: {
+          type: "delegate",
+          target_model: "worker.fast",
+        },
+      } as unknown as RoutingDecision,
+    });
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+
+    await expect(
+      adapter.generateRoutingDecision(
+        config.getProvider("openrouter")!,
+        config.findInternalModel("orchestrator.default")!,
+        createRoutingDecisionRequest("orchestrator.default"),
+      ),
+    ).rejects.toMatchObject({
+      status: 502,
+      code: "provider_error",
+      message: "Routing decision failed validation.",
+    });
+    expect(sdk.generateObjectCalls).toHaveLength(1);
+    expect(sdk.generateTextCalls).toHaveLength(0);
+  });
+
   it("maps delegate_llm tool calls from AI SDK results", async () => {
     const sdk = createFakeSdk({
       text: "",
@@ -150,6 +254,87 @@ describe("OpenRouter provider adapter", () => {
       },
     ]);
     expect(result.finishReason).toBe("tool_calls");
+  });
+
+  it("drops malformed delegate_llm tool calls instead of partially normalizing arguments", async () => {
+    const sdk = createFakeSdk({
+      text: "",
+      finishReason: "tool-calls",
+      toolCalls: [
+        {
+          toolCallId: "empty_target",
+          toolName: "delegate_llm",
+          input: {
+            target_model: "",
+            task: "draft",
+          },
+        },
+        {
+          toolCallId: "empty_task",
+          toolName: "delegate_llm",
+          input: {
+            target_model: "worker.fast",
+            task: "",
+          },
+        },
+        {
+          toolCallId: "bad_optional",
+          toolName: "delegate_llm",
+          input: {
+            target_model: "worker.fast",
+            task: "draft",
+            reason: 123,
+          },
+        },
+        {
+          toolCallId: "bad_dependency",
+          toolName: "delegate_llm",
+          input: {
+            target_model: "worker.fast",
+            task: "draft",
+            depends_on: ["context", ""],
+          },
+        },
+        {
+          toolCallId: "valid",
+          toolName: "delegate_llm",
+          input: {
+            target_model: "worker.fast",
+            task: "draft",
+            output_contract: "Return markdown.",
+            reason: "fast",
+            task_id: "draft_task",
+            depends_on: ["context"],
+            final: false,
+          },
+        },
+      ],
+      totalUsage: usage(1, 1, 2),
+    });
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+
+    const result = await adapter.generate(
+      config.getProvider("openrouter")!,
+      config.findInternalModel("orchestrator.default")!,
+      createGenerateRequest("orchestrator.default"),
+    );
+
+    expect(result.toolCalls).toEqual([
+      {
+        id: "valid",
+        name: "delegate_llm",
+        arguments: {
+          target_model: "worker.fast",
+          task: "draft",
+          output_contract: "Return markdown.",
+          reason: "fast",
+          task_id: "draft_task",
+          depends_on: ["context"],
+          final: false,
+        },
+      },
+    ]);
   });
 
   it("preserves valid provider-supplied delegate messages", async () => {
@@ -191,7 +376,7 @@ describe("OpenRouter provider adapter", () => {
     ]);
   });
 
-  it("omits malformed provider-supplied delegate messages", async () => {
+  it("drops delegate_llm tool calls with malformed provider-supplied delegate messages", async () => {
     const sdk = createFakeSdk({
       text: "",
       finishReason: "tool-calls",
@@ -220,16 +405,7 @@ describe("OpenRouter provider adapter", () => {
       createGenerateRequest("orchestrator.default"),
     );
 
-    expect(result.toolCalls).toEqual([
-      {
-        id: "call_1",
-        name: "delegate_llm",
-        arguments: {
-          target_model: "worker.fast",
-          task: "draft",
-        },
-      },
-    ]);
+    expect(result.toolCalls).toBeUndefined();
   });
 
   it("registers the internal delegate_llm tool with the AI SDK when requested", async () => {
@@ -338,6 +514,24 @@ describe("OpenRouter provider adapter", () => {
     ]);
     expect(sdk.generateTextCalls[0]).not.toHaveProperty("tools");
     expect(sdk.streamTextCalls[0]).not.toHaveProperty("tools");
+
+    const generateMessages = JSON.stringify(
+      (sdk.generateTextCalls[0] as { messages?: unknown }).messages,
+    );
+    const streamMessages = JSON.stringify(
+      (sdk.streamTextCalls[0] as { messages?: unknown }).messages,
+    );
+    [generateMessages, streamMessages].forEach((messages) => {
+      expect(messages).toContain("delegate result");
+      expect(messages).not.toContain("worker.fast");
+      expect(messages).not.toContain("draft");
+      expect(messages).not.toContain("Model:");
+      expect(messages).not.toContain("Task:");
+      expect(messages).not.toContain("Status:");
+      expect(messages).not.toContain("LatencyMs");
+      expect(messages).not.toContain("FinishReason");
+      expect(messages).not.toContain("Usage:");
+    });
   });
 
   it("streams text chunks through the OpenRouter AI SDK path", async () => {
@@ -376,6 +570,59 @@ describe("OpenRouter provider adapter", () => {
       timeout: 30000,
     });
   });
+
+  it.each(["error", "other", "unknown"])(
+    "converts %s generate finish reason into a normalized provider failure",
+    async (finishReason) => {
+      const sdk = createFakeSdk({
+        text: "ambiguous answer",
+        finishReason,
+        totalUsage: usage(1, 1, 2),
+      });
+      const adapter = new OpenRouterAdapter(sdk);
+      const config = createConfig();
+
+      await expect(
+        adapter.generate(
+          config.getProvider("openrouter")!,
+          config.findInternalModel("worker.fast")!,
+          createGenerateRequest("worker.fast"),
+        ),
+      ).rejects.toMatchObject({
+        status: 502,
+        code: "provider_error",
+      });
+    },
+  );
+
+  it.each(["error", "other", "unknown"])(
+    "converts %s stream finish reason into a normalized provider failure",
+    async (streamFinishReason) => {
+      const sdk = createFakeSdk({
+        text: "unused",
+        finishReason: "stop",
+        totalUsage: usage(0, 0, 0),
+        streamChunks: ["partial"],
+        streamFinishReason,
+        streamUsage: usage(1, 1, 2),
+      });
+      const adapter = new OpenRouterAdapter(sdk);
+      const config = createConfig();
+
+      await expect(async () => {
+        for await (const chunk of adapter.stream(
+          config.getProvider("openrouter")!,
+          config.findInternalModel("worker.fast")!,
+          createGenerateRequest("worker.fast"),
+        )) {
+          void chunk;
+        }
+      }).rejects.toMatchObject({
+        status: 502,
+        code: "provider_error",
+      });
+    },
+  );
 
   it("passes abort signals through to OpenRouter stream calls", async () => {
     const sdk = createFakeSdk({
@@ -441,6 +688,46 @@ describe("OpenRouter provider adapter", () => {
     });
     expect(sdk.streamTextCalls[0]).toMatchObject({
       system: expect.stringContaining("client system"),
+    });
+  });
+
+  it("preserves normalized OpenAI HTTP errors from SDK calls", async () => {
+    const normalizedError = OpenAiHttpError.timeout("Known timeout.");
+    const sdk = createFakeSdk(normalizedError);
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+
+    await expect(
+      adapter.generate(
+        config.getProvider("openrouter")!,
+        config.findInternalModel("worker.fast")!,
+        createGenerateRequest("worker.fast"),
+      ),
+    ).rejects.toMatchObject({
+      status: 408,
+      code: "timeout",
+    });
+    await expect(
+      adapter.generateRoutingDecision(
+        config.getProvider("openrouter")!,
+        config.findInternalModel("orchestrator.default")!,
+        createRoutingDecisionRequest("orchestrator.default"),
+      ),
+    ).rejects.toMatchObject({
+      status: 408,
+      code: "timeout",
+    });
+    await expect(async () => {
+      for await (const chunk of adapter.stream(
+        config.getProvider("openrouter")!,
+        config.findInternalModel("worker.fast")!,
+        createGenerateRequest("worker.fast"),
+      )) {
+        void chunk;
+      }
+    }).rejects.toMatchObject({
+      status: 408,
+      code: "timeout",
     });
   });
 
@@ -533,6 +820,30 @@ describe("OpenRouter provider adapter", () => {
     expect(sdk.chatModelIds).toEqual(["openai/gpt-4.1-mini"]);
   });
 
+  it("resolves configured model provider for routing decisions through the provider-backed generation port", async () => {
+    const routingDecision = createRoutingDecision();
+    const sdk = createFakeSdk({
+      text: "unused",
+      finishReason: "stop",
+      totalUsage: usage(0, 0, 0),
+      object: routingDecision,
+    });
+    const config = createConfig();
+    const port = new ProviderBackedLlmGenerationPort(
+      config,
+      new ProviderRegistry(config, new OpenRouterAdapter(sdk)),
+    );
+
+    const result = await port.generateRoutingDecision(
+      createRoutingDecisionRequest("orchestrator.default"),
+    );
+
+    expect(result).toEqual(routingDecision);
+    expect(sdk.chatModelIds).toEqual(["openai/gpt-4.1"]);
+    expect(sdk.generateObjectCalls).toHaveLength(1);
+    expect(sdk.generateTextCalls).toHaveLength(0);
+  });
+
   it("maps unresolved internal models to internal errors before generate provider calls", async () => {
     const sdk = createFakeSdk({
       text: "should not be called",
@@ -550,6 +861,29 @@ describe("OpenRouter provider adapter", () => {
       "missing.internal",
     );
     expect(sdk.generateTextCalls).toHaveLength(0);
+  });
+
+  it("maps unresolved internal models to internal errors before routing decision provider calls", async () => {
+    const sdk = createFakeSdk({
+      text: "should not be called",
+      finishReason: "stop",
+      totalUsage: usage(0, 0, 0),
+      object: createRoutingDecision(),
+    });
+    const config = createConfig();
+    const port = new ProviderBackedLlmGenerationPort(
+      config,
+      new ProviderRegistry(config, new OpenRouterAdapter(sdk)),
+    );
+
+    await expectInternalModelError(
+      () =>
+        port.generateRoutingDecision(
+          createRoutingDecisionRequest("missing.internal"),
+        ),
+      "missing.internal",
+    );
+    expect(sdk.generateObjectCalls).toHaveLength(0);
   });
 
   it("maps unresolved internal models to internal errors before stream provider calls", async () => {
@@ -572,6 +906,55 @@ describe("OpenRouter provider adapter", () => {
         void chunk;
       }
     }, "missing.internal");
+    expect(sdk.streamTextCalls).toHaveLength(0);
+  });
+
+  it("maps missing configured providers to generic internal errors before provider calls", async () => {
+    const sdk = createFakeSdk({
+      text: "should not be called",
+      finishReason: "stop",
+      totalUsage: usage(0, 0, 0),
+      object: createRoutingDecision(),
+      streamChunks: ["should not stream"],
+    });
+    const config = createConfig();
+    const registry = new ProviderRegistry(config, new OpenRouterAdapter(sdk));
+    const missingProviderModel = {
+      ...config.findInternalModel("worker.fast")!,
+      provider: "missing.provider",
+    };
+    const missingProviderOrchestrator = {
+      ...config.findInternalModel("orchestrator.default")!,
+      provider: "missing.provider",
+    };
+
+    await expectGenericInternalError(
+      () =>
+        registry.generate(
+          missingProviderModel,
+          createGenerateRequest("worker.fast"),
+        ),
+      "missing.provider",
+    );
+    await expectGenericInternalError(
+      () =>
+        registry.generateRoutingDecision(
+          missingProviderOrchestrator,
+          createRoutingDecisionRequest("orchestrator.default"),
+        ),
+      "missing.provider",
+    );
+    await expectGenericInternalError(async () => {
+      for await (const chunk of registry.stream(
+        missingProviderModel,
+        createGenerateRequest("worker.fast"),
+      )) {
+        void chunk;
+      }
+    }, "missing.provider");
+
+    expect(sdk.generateTextCalls).toHaveLength(0);
+    expect(sdk.generateObjectCalls).toHaveLength(0);
     expect(sdk.streamTextCalls).toHaveLength(0);
   });
 
@@ -648,6 +1031,39 @@ async function expectInternalModelError(
   expect(JSON.stringify(body)).not.toContain(internalModelId);
 }
 
+async function expectGenericInternalError(
+  action: () => Promise<unknown>,
+  forbiddenDetail: string,
+): Promise<void> {
+  let caught: unknown;
+
+  try {
+    await action();
+  } catch (error) {
+    caught = error;
+  }
+
+  expect(caught).toBeInstanceOf(OpenAiHttpError);
+
+  const error = caught as OpenAiHttpError;
+  expect(error).toMatchObject({
+    status: 500,
+    type: "server_error",
+    code: "internal_error",
+  });
+
+  const body = error.toBody();
+  expect(body).toEqual({
+    error: {
+      message: "Internal server error.",
+      type: "server_error",
+      param: null,
+      code: "internal_error",
+    },
+  });
+  expect(JSON.stringify(body)).not.toContain(forbiddenDetail);
+}
+
 function createGenerateRequest(modelId: string): LlmGenerateRequest {
   return {
     modelId,
@@ -658,23 +1074,57 @@ function createGenerateRequest(modelId: string): LlmGenerateRequest {
   };
 }
 
+function createRoutingDecisionRequest(
+  modelId: string,
+): LlmRoutingDecisionRequest {
+  return {
+    modelId,
+    publicModelId: "route/default",
+    role: "orchestrator" as const,
+    messages: [{ role: "user" as const, content: "hello" }],
+    delegateModels: [
+      {
+        id: "worker.fast",
+        capabilities: ["general", "fast_draft"],
+      },
+    ],
+    timeoutMs: 30000,
+  };
+}
+
+function createRoutingDecision(): RoutingDecision {
+  return {
+    final_target: {
+      type: "delegate" as const,
+      target_model: "worker.fast",
+      matched_capability: "fast_draft",
+      reason: "The delegate is the best allowed match.",
+    },
+    pre_final_tasks: [],
+  };
+}
+
 function createFakeSdk(
   result: FakeGenerateTextResult | Error,
 ): OpenRouterSdk & {
   createOpenRouterCalls: unknown[];
   chatModelIds: string[];
   generateTextCalls: unknown[];
+  generateObjectCalls: unknown[];
   streamTextCalls: unknown[];
+  generateObject(options: unknown): Promise<{ object: RoutingDecision }>;
 } {
   const createOpenRouterCalls: unknown[] = [];
   const chatModelIds: string[] = [];
   const generateTextCalls: unknown[] = [];
+  const generateObjectCalls: unknown[] = [];
   const streamTextCalls: unknown[] = [];
 
   return {
     createOpenRouterCalls,
     chatModelIds,
     generateTextCalls,
+    generateObjectCalls,
     streamTextCalls,
     createOpenRouter(options) {
       createOpenRouterCalls.push(options);
@@ -692,6 +1142,34 @@ function createFakeSdk(
       }
 
       return result;
+    },
+    async generateObject(options) {
+      generateObjectCalls.push(options);
+      if (result instanceof Error) {
+        throw result;
+      }
+      if (!result.object) {
+        throw new Error("Fake generateObject result was not configured.");
+      }
+      const generateObjectOptions = options as {
+        schema?: {
+          validate?: (
+            value: unknown,
+          ) =>
+            | FakeRoutingDecisionValidationResult
+            | PromiseLike<FakeRoutingDecisionValidationResult>;
+        };
+      };
+      const validation = await Promise.resolve(
+        generateObjectOptions.schema?.validate?.(result.object),
+      );
+      if (validation && !validation.success) {
+        throw validation.error;
+      }
+
+      return {
+        object: validation?.success ? validation.value : result.object,
+      };
     },
     streamText(options) {
       streamTextCalls.push(options);
@@ -728,7 +1206,18 @@ interface FakeGenerateTextResult {
     outputTokens?: number;
     totalTokens?: number;
   };
+  object?: RoutingDecision;
 }
+
+type FakeRoutingDecisionValidationResult =
+  | {
+      success: true;
+      value: RoutingDecision;
+    }
+  | {
+      success: false;
+      error: Error;
+    };
 
 function usage(input: number, output: number, total: number) {
   return {

@@ -32,6 +32,7 @@ describe("GatewayConfigService", () => {
         orchestrator: "orchestrator.default",
         allowedDelegateModels: ["worker.fast"],
         allowClientTools: false,
+        allowOrchestratorFallback: true,
       });
       expect(JSON.stringify(config.listPublicModels())).not.toContain(
         "sk-openrouter",
@@ -55,6 +56,20 @@ describe("GatewayConfigService", () => {
     });
   });
 
+  it("allows routes to opt out of orchestrator fallback", () => {
+    const rawConfig = minimalConfig();
+    rawConfig.routes.default.allowOrchestratorFallback = false;
+
+    const config = new GatewayConfigService({
+      rawConfig,
+      env: validEnv(),
+    });
+
+    expect(config.resolveRouteByPublicModel("route/default")).toMatchObject({
+      allowOrchestratorFallback: false,
+    });
+  });
+
   it("loads configured payload and message limits for routes", () => {
     const rawConfig = minimalConfig();
     rawConfig.routes.default.maxMessages = 10;
@@ -71,6 +86,61 @@ describe("GatewayConfigService", () => {
       maxMessageContentLength: 4096,
       maxPayloadBytes: 65536,
     });
+  });
+
+  it("loads an explicit global HTTP payload parser limit", () => {
+    const rawConfig = minimalConfig();
+    rawConfig.server.maxPayloadBytes = 2048;
+    rawConfig.routes.default.maxPayloadBytes = 65536;
+
+    const config = new GatewayConfigService({
+      rawConfig,
+      env: validEnv(),
+    });
+
+    expect(config.getHttpMaxPayloadBytes()).toBe(2048);
+    expect(config.resolveRouteByPublicModel("route/default")).toMatchObject({
+      maxPayloadBytes: 65536,
+    });
+  });
+
+  it("loads configured redaction keys with env-name variants", () => {
+    const rawConfig = minimalConfig();
+    rawConfig.observability = {
+      logLevel: "info",
+      redact: ["apiKey", "token", "authorization", "customSecret"],
+    };
+
+    const config = new GatewayConfigService({
+      rawConfig,
+      env: validEnv(),
+    });
+
+    expect(config.getRedactionKeys()).toEqual(
+      expect.arrayContaining([
+        "apiKey",
+        "apiKeyEnv",
+        "token",
+        "tokenEnv",
+        "authorization",
+        "customSecret",
+        "customSecretEnv",
+      ]),
+    );
+  });
+
+  it("rejects invalid global HTTP payload parser limits", () => {
+    const config = minimalConfig();
+    config.server.maxPayloadBytes = 0;
+
+    expectConfigErrorAt(
+      () =>
+        new GatewayConfigService({
+          rawConfig: config,
+          env: validEnv(),
+        }),
+      "server.maxPayloadBytes",
+    );
   });
 
   it.each([["maxMessages"], ["maxMessageContentLength"], ["maxPayloadBytes"]])(
@@ -198,45 +268,90 @@ describe("GatewayConfigService", () => {
     }
   });
 
-  it("rejects routed streaming routes without an allowed general delegate", () => {
+  it("rejects allowed delegate models that do not exist", () => {
+    const config = minimalConfig();
+    config.routes.default.allowedDelegateModels = ["worker.missing"];
+
+    expectConfigErrorAt(
+      () =>
+        new GatewayConfigService({
+          rawConfig: config,
+          env: validEnv(),
+        }),
+      "routes.default.allowedDelegateModels[0]",
+    );
+  });
+
+  it("rejects delegate capabilities that are not strings", () => {
+    const config = minimalConfig();
+    config.models["worker.fast"].capabilities = [
+      "math",
+      42,
+    ] as unknown as string[];
+
+    expectConfigErrorAt(
+      () =>
+        new GatewayConfigService({
+          rawConfig: config,
+          env: validEnv(),
+        }),
+      "models.worker.fast.capabilities[1]",
+    );
+  });
+
+  it("allows routed streaming routes without an allowed general delegate", () => {
     const config = minimalConfig();
     config.models["worker.fast"].capabilities = ["code"];
     config.models["orchestrator.default"].capabilities = ["general"];
-    const { path, cleanup } = writeConfig(config);
-    try {
-      expectConfigErrorAt(
-        () =>
-          new GatewayConfigService({
-            configPath: path,
-            env: validEnv(),
-          }),
-        "routes.default.allowedDelegateModels",
-      );
-    } finally {
-      cleanup();
-    }
+
+    const service = new GatewayConfigService({
+      rawConfig: config,
+      env: validEnv(),
+    });
+
+    expect(service.resolveRouteByPublicModel("route/default")).toMatchObject({
+      allowedDelegateModels: ["worker.fast"],
+      streamFinalOnly: true,
+    });
   });
 
-  it("rejects routed streaming delegates without a canonical routing capability", () => {
+  it("allows routed streaming delegates with non-canonical capabilities", () => {
     const config = minimalConfig();
-    config.models["worker.restricted"].capabilities = ["fast_draft"];
+    config.models["worker.fast"].capabilities = ["math"];
+    config.models["worker.restricted"].capabilities = ["symbolic_math"];
     config.routes.default.allowedDelegateModels = [
       "worker.fast",
       "worker.restricted",
     ];
-    const { path, cleanup } = writeConfig(config);
-    try {
-      expectConfigErrorAt(
-        () =>
-          new GatewayConfigService({
-            configPath: path,
-            env: validEnv(),
-          }),
-        "routes.default.allowedDelegateModels[1]",
-      );
-    } finally {
-      cleanup();
-    }
+
+    const service = new GatewayConfigService({
+      rawConfig: config,
+      env: validEnv(),
+    });
+
+    expect(
+      service.listAllowedDelegateModels(
+        service.resolveRouteByPublicModel("route/default")!,
+      ),
+    ).toEqual([
+      { id: "worker.fast", capabilities: ["math"] },
+      { id: "worker.restricted", capabilities: ["symbolic_math"] },
+    ]);
+  });
+
+  it("does not expose mutable allowed delegate capabilities", () => {
+    const service = new GatewayConfigService({
+      rawConfig: minimalConfig(),
+      env: validEnv(),
+    });
+    const route = service.resolveRouteByPublicModel("route/default")!;
+    const [delegate] = service.listAllowedDelegateModels(route);
+
+    delegate.capabilities.push("mutated");
+
+    expect(service.listAllowedDelegateModels(route)).toEqual([
+      { id: "worker.fast", capabilities: ["general", "fast_draft"] },
+    ]);
   });
 
   it("rejects non-boolean client tool route policy", () => {
@@ -251,6 +366,25 @@ describe("GatewayConfigService", () => {
             env: validEnv(),
           }),
         "routes.default.allowClientTools",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("rejects non-boolean orchestrator fallback route policy", () => {
+    const config = minimalConfig();
+    config.routes.default.allowOrchestratorFallback =
+      "yes" as unknown as boolean;
+    const { path, cleanup } = writeConfig(config);
+    try {
+      expectConfigErrorAt(
+        () =>
+          new GatewayConfigService({
+            configPath: path,
+            env: validEnv(),
+          }),
+        "routes.default.allowOrchestratorFallback",
       );
     } finally {
       cleanup();

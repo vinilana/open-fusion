@@ -11,7 +11,9 @@ import {
   LlmGenerateRequest,
   LlmGenerateResult,
   LlmGenerationPort,
+  LlmRoutingDecisionRequest,
   LlmStreamChunk,
+  RoutingDecision,
 } from "../src/orchestration/llm-generation.port";
 import { StubLlmGenerationPort } from "../src/orchestration/stub-llm-generation.port";
 import {
@@ -68,6 +70,44 @@ describe("OpenAI-compatible API", () => {
     });
   });
 
+  it("serves public health checks without authentication", async () => {
+    await request(app.getHttpServer()).get("/health/live").expect(200, {
+      status: "ok",
+    });
+    await request(app.getHttpServer())
+      .get("/health/ready")
+      .expect(200, {
+        status: "ok",
+        checks: {
+          config: "loaded",
+        },
+      });
+  });
+
+  it("logs auth failures for /v1 requests without bearer tokens", async () => {
+    const logSpy = jest
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    try {
+      await request(app.getHttpServer())
+        .get("/v1/models")
+        .set("x-request-id", "req-auth-log")
+        .expect(401);
+
+      const serializedLogs = logSpy.mock.calls.flat().join("\n");
+      expect(serializedLogs).toContain('"event":"http_request.failed"');
+      expect(serializedLogs).toContain('"requestId":"req-auth-log"');
+      expect(serializedLogs).toContain('"method":"GET"');
+      expect(serializedLogs).toContain('"path":"/v1/models"');
+      expect(serializedLogs).toContain('"statusCode":401');
+      expect(serializedLogs).not.toContain("Authorization");
+      expect(serializedLogs).not.toContain("Bearer");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
   it("rejects invalid bearer tokens without echoing the token", async () => {
     const response = await request(app.getHttpServer())
       .get("/v1/models")
@@ -76,6 +116,32 @@ describe("OpenAI-compatible API", () => {
 
     expect(JSON.stringify(response.body)).not.toContain("invalid-secret-token");
     expect(response.body.error.code).toBe("invalid_api_key");
+  });
+
+  it("logs successful /v1/models requests without prompts, responses, or tokens", async () => {
+    const logSpy = jest
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+
+    try {
+      await request(app.getHttpServer())
+        .get("/v1/models")
+        .set("Authorization", "Bearer test-gateway-key")
+        .set("x-request-id", "req-models-log")
+        .expect(200);
+
+      const serializedLogs = logSpy.mock.calls.flat().join("\n");
+      expect(serializedLogs).toContain('"event":"http_request.completed"');
+      expect(serializedLogs).toContain('"requestId":"req-models-log"');
+      expect(serializedLogs).toContain('"clientId":"local-dev"');
+      expect(serializedLogs).toContain('"method":"GET"');
+      expect(serializedLogs).toContain('"path":"/v1/models"');
+      expect(serializedLogs).toContain('"statusCode":200');
+      expect(serializedLogs).not.toContain("test-gateway-key");
+      expect(serializedLogs).not.toContain("route/default");
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 
   it("lists public models for an authenticated client", async () => {
@@ -485,14 +551,50 @@ describe("OpenAI-compatible API", () => {
       expect(accumulateStreamContent(response.text)).toBe(
         "client visible final",
       );
-      expect(response.text).not.toContain("delegate_llm");
-      expect(response.text).not.toContain("target_model");
-      expect(response.text).not.toContain("task_id");
-      expect(response.text).not.toContain("depends_on");
-      expect(response.text).not.toContain("collect private context");
-      expect(response.text).not.toContain("RAW_PREFINAL_RESULT");
-      expect(response.text).not.toContain("EXECUTION_GRAPH_METADATA");
+      expectNoInternalRoutingDetails(response.text, [
+        "worker.fast",
+        "orchestrator.default",
+        "fast_draft",
+        "collect private context",
+        "collect private audit",
+        "RAW_PREFINAL_RESULT",
+        "EXECUTION_GRAPH_METADATA",
+      ]);
       expect(response.text.trim().endsWith("data: [DONE]")).toBe(true);
+    } finally {
+      await graphApp.close();
+    }
+  });
+
+  it("returns a sanitized OpenAI error when routing graph validation fails before SSE", async () => {
+    const routeId = "sensitive-route-007";
+    const publicModel = "route/sanitized-routing";
+    const graphApp = await createAppWithGenerationPort(
+      InvalidRoutingGraphGenerationPort,
+      configWithSensitiveRouteId(routeId, publicModel),
+    );
+
+    try {
+      const response = await request(graphApp.app.getHttpServer())
+        .post("/v1/chat/completions")
+        .set("Authorization", "Bearer test-gateway-key")
+        .send({
+          model: publicModel,
+          stream: true,
+          messages: [{ role: "user", content: "stream with invalid graph" }],
+        });
+
+      expect([400, 500, 502]).toContain(response.status);
+      expect(response.headers["content-type"]).toContain("application/json");
+      expectOpenAiErrorEnvelope(response.body);
+      expect(response.text).not.toContain("data:");
+      expectNoInternalRoutingDetails(JSON.stringify(response.body), [
+        routeId,
+        "private_capability",
+        "capabilities",
+        "Execution graph",
+        "duplicate agent task",
+      ]);
     } finally {
       await graphApp.close();
     }
@@ -645,7 +747,61 @@ function restoreProcessEnv(previousEnv: NodeJS.ProcessEnv): void {
   Object.assign(process.env, previousEnv);
 }
 
+function createRoutingDecision(input: {
+  targetModel: string;
+  matchedCapability: string;
+  preFinalTasks?: RoutingDecision["pre_final_tasks"];
+}): RoutingDecision {
+  return {
+    final_target: {
+      type: "delegate",
+      target_model: input.targetModel,
+      matched_capability: input.matchedCapability,
+      reason: "Selected by the e2e fake routing decision.",
+    },
+    pre_final_tasks: input.preFinalTasks ?? [],
+  };
+}
+
+function firstDelegateRoutingDecision(
+  request: LlmRoutingDecisionRequest,
+): RoutingDecision {
+  const delegate = request.delegateModels[0];
+  return createRoutingDecision({
+    targetModel: delegate.id,
+    matchedCapability: delegate.capabilities[0] ?? "general",
+  });
+}
+
+function configWithSensitiveRouteId(
+  routeId: string,
+  publicModel: string,
+): RawGatewayConfig {
+  const rawConfig = minimalConfig();
+  rawConfig.auth.apiKeys = rawConfig.auth.apiKeys.map((apiKey) =>
+    apiKey.id === "local-dev"
+      ? { ...apiKey, allowedRoutes: [routeId] }
+      : apiKey,
+  );
+  rawConfig.routes = {
+    [routeId]: {
+      ...rawConfig.routes.default,
+      publicModel,
+    },
+  };
+  return rawConfig;
+}
+
+const internalRoutingTrace =
+  "worker.secret orchestrator.secret target_model matched_capability depends_on sensitive-route-007 private_capability capabilities";
+
 class FailingBeforeFirstChunkGenerationPort implements LlmGenerationPort {
+  async generateRoutingDecision(): Promise<RoutingDecision> {
+    throw OpenAiHttpError.providerError(
+      "Provider failed before streaming began.",
+    );
+  }
+
   async generate(): Promise<LlmGenerateResult> {
     throw OpenAiHttpError.providerError(
       "Provider failed before streaming began.",
@@ -663,7 +819,54 @@ class FailingBeforeFirstChunkGenerationPort implements LlmGenerationPort {
   }
 }
 
+class InvalidRoutingGraphGenerationPort implements LlmGenerationPort {
+  async generateRoutingDecision(): Promise<RoutingDecision> {
+    return createRoutingDecision({
+      targetModel: "worker.fast",
+      matchedCapability: "general",
+      preFinalTasks: [
+        {
+          task_id: internalRoutingTrace,
+          target_model: "worker.fast",
+          matched_capability: "general",
+          task: "collect private context",
+          depends_on: [],
+        },
+        {
+          task_id: internalRoutingTrace,
+          target_model: "worker.fast",
+          matched_capability: "general",
+          task: "collect private audit",
+          depends_on: [],
+        },
+      ],
+    });
+  }
+
+  async generate(): Promise<LlmGenerateResult> {
+    throw OpenAiHttpError.providerError(
+      "Internal pre-final tasks should not run after invalid graph validation.",
+    );
+  }
+
+  async *stream(): AsyncIterable<LlmStreamChunk> {
+    throw OpenAiHttpError.providerError(
+      "Final streaming should not start after invalid graph validation.",
+    );
+    yield {
+      content: "",
+      finishReason: "stop",
+    };
+  }
+}
+
 class DelegatingStreamGenerationPort implements LlmGenerationPort {
+  async generateRoutingDecision(
+    request: LlmRoutingDecisionRequest,
+  ): Promise<RoutingDecision> {
+    return firstDelegateRoutingDecision(request);
+  }
+
   async generate(): Promise<LlmGenerateResult> {
     return {
       content: "",
@@ -712,6 +915,13 @@ class DelegatingStreamGenerationPort implements LlmGenerationPort {
 }
 
 class CodingFallbackGenerationPort implements LlmGenerationPort {
+  async generateRoutingDecision(): Promise<RoutingDecision> {
+    return createRoutingDecision({
+      targetModel: "worker.fast",
+      matchedCapability: "code",
+    });
+  }
+
   async generate(): Promise<LlmGenerateResult> {
     return {
       content: "orchestrator direct answer must not be streamed",
@@ -746,6 +956,29 @@ class CodingFallbackGenerationPort implements LlmGenerationPort {
 }
 
 class PreFinalTraceGenerationPort implements LlmGenerationPort {
+  async generateRoutingDecision(): Promise<RoutingDecision> {
+    return createRoutingDecision({
+      targetModel: "worker.fast",
+      matchedCapability: "general",
+      preFinalTasks: [
+        {
+          task_id: "context",
+          target_model: "worker.fast",
+          matched_capability: "general",
+          task: "collect private context",
+          depends_on: [],
+        },
+        {
+          task_id: "audit",
+          target_model: "worker.fast",
+          matched_capability: "general",
+          task: "collect private audit",
+          depends_on: [],
+        },
+      ],
+    });
+  }
+
   async generate(request: LlmGenerateRequest): Promise<LlmGenerateResult> {
     if (request.role === "orchestrator") {
       return {
@@ -816,6 +1049,12 @@ class PreFinalTraceGenerationPort implements LlmGenerationPort {
 class FailingAfterFirstChunkGenerationPort implements LlmGenerationPort {
   private generateCalls = 0;
 
+  async generateRoutingDecision(
+    request: LlmRoutingDecisionRequest,
+  ): Promise<RoutingDecision> {
+    return firstDelegateRoutingDecision(request);
+  }
+
   async generate(): Promise<LlmGenerateResult> {
     this.generateCalls += 1;
 
@@ -868,4 +1107,46 @@ function accumulateStreamContent(streamBody: string): string {
     )
     .map((chunk) => chunk.choices?.[0]?.delta?.content ?? "")
     .join("");
+}
+
+function expectOpenAiErrorEnvelope(body: unknown): void {
+  expect(body).toHaveProperty("error");
+  const error = (body as { error?: Record<string, unknown> }).error;
+  expect(error).toBeDefined();
+  expect(error?.message).toEqual(expect.any(String));
+  expect(error?.type).toEqual(expect.any(String));
+  expect(error).toHaveProperty("param");
+  expect(error?.param === null || typeof error?.param === "string").toBe(true);
+  expect(error?.code).toEqual(expect.any(String));
+}
+
+function expectNoInternalRoutingDetails(
+  serialized: string,
+  additionalTokens: string[] = [],
+): void {
+  [
+    "worker.",
+    "orchestrator.",
+    "target_model",
+    "targetModel",
+    "matched_capability",
+    "matchedCapability",
+    "matched capability",
+    "depends_on",
+    "dependsOn",
+    "delegate_llm",
+    "final_target",
+    "pre_final_tasks",
+    "task_id",
+    "toolResults",
+    "untrusted",
+    "Model:",
+    "Task:",
+    "LatencyMs",
+    "FinishReason",
+    "Usage",
+    ...additionalTokens,
+  ].forEach((token) => {
+    expect(serialized).not.toContain(token);
+  });
 }

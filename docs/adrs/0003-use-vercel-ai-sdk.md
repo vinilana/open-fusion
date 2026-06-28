@@ -32,4 +32,4 @@ Negativas:
 - [Spec 002](../specs/002-llm-orchestration-routing.md)
 - [Spec 004](../specs/004-provider-adapters-openrouter.md)
 - [Spec 005](../specs/005-streaming-tools-response-normalization.md)
-
+- [Spec 007](../specs/007-orchestrator-capability-matching.md)

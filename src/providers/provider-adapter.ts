@@ -5,7 +5,9 @@ import {
 import {
   LlmGenerateRequest,
   LlmGenerateResult,
+  LlmRoutingDecisionRequest,
   LlmStreamChunk,
+  RoutingDecision,
 } from "../orchestration/llm-generation.port";
 
 export interface ProviderAdapter {
@@ -16,6 +18,12 @@ export interface ProviderAdapter {
     model: InternalModelConfig,
     request: LlmGenerateRequest,
   ): Promise<LlmGenerateResult>;
+
+  generateRoutingDecision(
+    provider: ProviderConfig,
+    model: InternalModelConfig,
+    request: LlmRoutingDecisionRequest,
+  ): Promise<RoutingDecision>;
 
   stream?(
     provider: ProviderConfig,

@@ -3,12 +3,15 @@ import { Injectable } from "@nestjs/common";
 import {
   GatewayConfigService,
   InternalModelConfig,
+  ProviderConfig,
 } from "../config/gateway-config.service";
 import { OpenAiHttpError } from "../errors/openai-http-error";
 import {
   LlmGenerateRequest,
   LlmGenerateResult,
+  LlmRoutingDecisionRequest,
   LlmStreamChunk,
+  RoutingDecision,
 } from "../orchestration/llm-generation.port";
 import { OpenRouterAdapter } from "./openrouter.adapter";
 
@@ -23,39 +26,40 @@ export class ProviderRegistry {
     model: InternalModelConfig,
     request: LlmGenerateRequest,
   ): Promise<LlmGenerateResult> {
-    const provider = this.config.getProvider(model.provider);
-    if (!provider) {
-      throw OpenAiHttpError.providerError(
-        `Provider '${model.provider}' is not configured.`,
-      );
-    }
+    const provider = this.resolveOpenRouterProvider(model);
 
-    if (provider.type === this.openRouter.type) {
-      return this.openRouter.generate(provider, model, request);
-    }
+    return this.openRouter.generate(provider, model, request);
+  }
 
-    throw OpenAiHttpError.providerError(
-      `Provider type '${provider.type}' is not supported.`,
-    );
+  async generateRoutingDecision(
+    model: InternalModelConfig,
+    request: LlmRoutingDecisionRequest,
+  ): Promise<RoutingDecision> {
+    const provider = this.resolveOpenRouterProvider(model);
+
+    return this.openRouter.generateRoutingDecision(provider, model, request);
   }
 
   stream(
     model: InternalModelConfig,
     request: LlmGenerateRequest,
   ): AsyncIterable<LlmStreamChunk> {
+    const provider = this.resolveOpenRouterProvider(model);
+    if (!this.openRouter.stream) {
+      throw OpenAiHttpError.internal();
+    }
+
+    return this.openRouter.stream(provider, model, request);
+  }
+
+  private resolveOpenRouterProvider(
+    model: InternalModelConfig,
+  ): ProviderConfig {
     const provider = this.config.getProvider(model.provider);
-    if (!provider) {
-      throw OpenAiHttpError.providerError(
-        `Provider '${model.provider}' is not configured.`,
-      );
+    if (!provider || provider.type !== this.openRouter.type) {
+      throw OpenAiHttpError.internal();
     }
 
-    if (provider.type === this.openRouter.type && this.openRouter.stream) {
-      return this.openRouter.stream(provider, model, request);
-    }
-
-    throw OpenAiHttpError.providerError(
-      `Provider type '${provider.type}' does not support streaming.`,
-    );
+    return provider;
   }
 }

@@ -18,7 +18,8 @@ Antes de implementar qualquer mudanca relevante, leia nesta ordem:
    - `docs/specs/004-provider-adapters-openrouter.md`
    - `docs/specs/005-streaming-tools-response-normalization.md`
    - `docs/specs/006-streaming-final-with-internal-delegations.md`
-   - `docs/specs/007-observability-resilience-security.md`
+   - `docs/specs/007-orchestrator-capability-matching.md`
+   - `docs/specs/008-observability-resilience-security.md`
 3. Os ADRs referenciados pela spec.
 4. Os testes existentes da area afetada.
 5. O codigo existente, quando houver.

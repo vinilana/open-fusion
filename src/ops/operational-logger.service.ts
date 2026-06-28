@@ -52,23 +52,35 @@ export interface LlmInvocationLogEvent {
 
 export interface RoutingLogEvent {
   event:
-    | "routing.classified"
     | "routing.execution_graph.validated"
     | "routing.execution_graph.executed";
   requestId: string;
   routeId: string;
   publicModel: string;
-  classifiedCapability?: string;
-  classificationMethod?: string;
-  classificationConfidence?: number;
   finalTargetType?: "delegate" | "orchestrator_fallback";
   finalTargetModel?: string;
-  missingCapability?: string;
   preFinalTaskCount?: number;
   dependencyCount?: number;
   delegationAttemptCount?: number;
   parallelBatchCount?: number;
   maxParallelTasks?: number;
+}
+
+export interface HttpRequestLogEvent {
+  event: "http_request.completed" | "http_request.failed";
+  requestId: string;
+  clientId?: string;
+  method: string;
+  path: string;
+  status: "success" | "error";
+  statusCode: number;
+  latencyMs: number;
+  error?: {
+    type: string;
+    code: string;
+    param: string | null;
+    status: number;
+  };
 }
 
 @Injectable()
@@ -82,6 +94,10 @@ export class OperationalLoggerService {
   }
 
   logRouting(event: RoutingLogEvent): void {
+    console.log(JSON.stringify(event));
+  }
+
+  logHttpRequest(event: HttpRequestLogEvent): void {
     console.log(JSON.stringify(event));
   }
 

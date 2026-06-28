@@ -2,7 +2,8 @@
   "version": 1,
   "server": {
     "port": 3000,
-    "publicBaseUrl": "http://localhost:3000"
+    "publicBaseUrl": "http://localhost:3000",
+    "maxPayloadBytes": 1048576
   },
   "auth": {
     "apiKeys": [
@@ -57,7 +58,7 @@
     "default": {
       "publicModel": "route/default",
       "orchestrator": "orchestrator.default",
-      "allowedDelegateModels": ["worker.fast"],
+      "allowedDelegateModels": ["worker.fast", "worker.plan"],
       "maxDelegations": 3,
       "maxDepth": 1,
       "timeoutMs": 60000,

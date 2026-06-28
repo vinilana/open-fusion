@@ -2,13 +2,12 @@ import { existsSync, readFileSync } from "node:fs";
 
 import { Inject, Injectable, Optional } from "@nestjs/common";
 
-import { hasCanonicalRoutingCapability } from "../routing/routing-capabilities";
-
 export interface RawGatewayConfig {
   version: number;
   server: {
     port: number;
     publicBaseUrl?: string;
+    maxPayloadBytes?: number;
   };
   auth: {
     apiKeys: Array<{
@@ -49,6 +48,7 @@ export interface RawGatewayConfig {
       delegateTimeoutMs: number;
       streamFinalOnly: boolean;
       allowClientTools?: boolean;
+      allowOrchestratorFallback?: boolean;
       maxMessages?: number;
       maxMessageContentLength?: number;
       maxPayloadBytes?: number;
@@ -102,6 +102,7 @@ export interface RouteConfig {
   delegateTimeoutMs: number;
   streamFinalOnly: boolean;
   allowClientTools: boolean;
+  allowOrchestratorFallback: boolean;
   maxMessages: number;
   maxMessageContentLength: number;
   maxPayloadBytes: number;
@@ -123,10 +124,15 @@ export const GATEWAY_CONFIG_OPTIONS = "GATEWAY_CONFIG_OPTIONS";
 const DEFAULT_MAX_MESSAGES = 128;
 const DEFAULT_MAX_MESSAGE_CONTENT_LENGTH = 32768;
 const DEFAULT_MAX_PAYLOAD_BYTES = 1048576;
+const DEFAULT_REDACTION_KEYS = ["authorization", "apiKey", "api_key", "token"];
 
 interface RuntimeGatewayConfig {
   server: {
     port: number;
+    maxPayloadBytes: number;
+  };
+  observability: {
+    redactionKeys: string[];
   };
   clients: GatewayClient[];
   providers: ProviderConfig[];
@@ -211,7 +217,7 @@ export class GatewayConfigService {
       return [
         {
           id: model.id,
-          capabilities: model.capabilities,
+          capabilities: [...model.capabilities],
         },
       ];
     });
@@ -227,6 +233,14 @@ export class GatewayConfigService {
         Math.max(maxPayloadBytes, route.maxPayloadBytes),
       0,
     );
+  }
+
+  getHttpMaxPayloadBytes(): number {
+    return this.runtime.server.maxPayloadBytes;
+  }
+
+  getRedactionKeys(): string[] {
+    return [...this.runtime.observability.redactionKeys];
   }
 }
 
@@ -354,6 +368,14 @@ function validateConfig(
   return {
     server: {
       port: raw.server.port,
+      maxPayloadBytes: validateOptionalPositiveInteger(
+        raw.server.maxPayloadBytes,
+        "server.maxPayloadBytes",
+        maxRoutePayloadBytes(routes),
+      ),
+    },
+    observability: {
+      redactionKeys: normalizeRedactionKeys(raw.observability?.redact),
     },
     clients,
     providers,
@@ -365,6 +387,31 @@ function validateConfig(
       ownedBy: "open-fusion",
     })),
   };
+}
+
+function maxRoutePayloadBytes(routes: RouteConfig[]): number {
+  return routes.reduce(
+    (maxPayloadBytes, route) =>
+      Math.max(maxPayloadBytes, route.maxPayloadBytes),
+    0,
+  );
+}
+
+function normalizeRedactionKeys(value: unknown): string[] {
+  const configured =
+    value === undefined
+      ? []
+      : validateStringArray(value, "observability.redact");
+  const keys = new Set<string>();
+
+  [...DEFAULT_REDACTION_KEYS, ...configured].forEach((key) => {
+    keys.add(key);
+    if (!key.toLowerCase().endsWith("env")) {
+      keys.add(`${key}Env`);
+    }
+  });
+
+  return [...keys];
 }
 
 function validateVersion(version: unknown): void {
@@ -560,36 +607,21 @@ function validateRoutes(
         "must be a boolean",
       );
     }
-    if (route.streamFinalOnly) {
-      let hasGeneralDelegate = false;
-      allowedDelegateModels.forEach((modelId, index) => {
-        const delegate = models.get(modelId);
-        if (!delegate) {
-          return;
-        }
-        if (!hasCanonicalRoutingCapability(delegate.capabilities)) {
-          throw new GatewayConfigError(
-            `routes.${id}.allowedDelegateModels[${index}]`,
-            "routed streaming delegates must declare at least one canonical capability: plan, code, review, design, or general",
-          );
-        }
-        if (delegate.capabilities.includes("general")) {
-          hasGeneralDelegate = true;
-        }
-      });
-      if (!hasGeneralDelegate) {
-        throw new GatewayConfigError(
-          `routes.${id}.allowedDelegateModels`,
-          "routed streaming routes must include at least one allowed delegate with the 'general' capability",
-        );
-      }
-    }
     if (
       route.allowClientTools !== undefined &&
       typeof route.allowClientTools !== "boolean"
     ) {
       throw new GatewayConfigError(
         `routes.${id}.allowClientTools`,
+        "must be a boolean",
+      );
+    }
+    if (
+      route.allowOrchestratorFallback !== undefined &&
+      typeof route.allowOrchestratorFallback !== "boolean"
+    ) {
+      throw new GatewayConfigError(
+        `routes.${id}.allowOrchestratorFallback`,
         "must be a boolean",
       );
     }
@@ -605,6 +637,7 @@ function validateRoutes(
       delegateTimeoutMs: route.delegateTimeoutMs,
       streamFinalOnly: route.streamFinalOnly,
       allowClientTools: route.allowClientTools === true,
+      allowOrchestratorFallback: route.allowOrchestratorFallback !== false,
       maxMessages,
       maxMessageContentLength,
       maxPayloadBytes,

@@ -4,20 +4,29 @@ import {
   ExceptionFilter,
   HttpException,
   HttpStatus,
+  Optional,
 } from "@nestjs/common";
-import { Response } from "express";
+import { Request, Response } from "express";
 
 import { GatewayConfigService } from "../config/gateway-config.service";
+import { OperationalLoggerService } from "../ops/operational-logger.service";
 import { OpenAiHttpError } from "./openai-http-error";
 
 @Catch()
 export class OpenAiErrorFilter implements ExceptionFilter {
-  constructor(private readonly config: GatewayConfigService) {}
+  constructor(
+    private readonly config: GatewayConfigService,
+    @Optional()
+    private readonly operationalLogger?: OperationalLoggerService,
+  ) {}
 
   catch(exception: unknown, host: ArgumentsHost): void {
-    const response = host.switchToHttp().getResponse<Response>();
+    const http = host.switchToHttp();
+    const request = http.getRequest<Request>();
+    const response = http.getResponse<Response>();
     const error = this.normalize(exception);
 
+    this.logHttpFailure(request, error);
     response.status(error.status).json(error.toBody());
   }
 
@@ -59,8 +68,31 @@ export class OpenAiErrorFilter implements ExceptionFilter {
 
   private payloadTooLarge(): OpenAiHttpError {
     return OpenAiHttpError.rateLimited(
-      `Request payload exceeds the configured limit of ${this.config.getMaxPayloadBytes()} bytes.`,
+      `Request payload exceeds the configured limit of ${this.config.getHttpMaxPayloadBytes()} bytes.`,
     );
+  }
+
+  private logHttpFailure(request: Request, error: OpenAiHttpError): void {
+    if (!request.path.startsWith("/v1/")) {
+      return;
+    }
+
+    this.operationalLogger?.logHttpRequest({
+      event: "http_request.failed",
+      requestId: request.requestId ?? "",
+      clientId: request.authenticatedClient?.id,
+      method: request.method,
+      path: request.path,
+      status: "error",
+      statusCode: error.status,
+      latencyMs: elapsedMs(request.startedAt),
+      error: {
+        type: error.type,
+        code: error.code,
+        param: error.param,
+        status: error.status,
+      },
+    });
   }
 }
 
@@ -76,4 +108,8 @@ function isPayloadTooLargeException(
       (typeof (exception as { type?: unknown }).type === "string" &&
         (exception as { type: string }).type === "entity.too.large"))
   );
+}
+
+function elapsedMs(startedAt: number | undefined): number {
+  return Math.max(0, Date.now() - (startedAt ?? Date.now()));
 }
