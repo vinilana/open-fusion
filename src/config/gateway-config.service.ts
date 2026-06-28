@@ -1,4 +1,58 @@
-import { Injectable } from "@nestjs/common";
+import { existsSync, readFileSync } from "node:fs";
+
+import { Inject, Injectable, Optional } from "@nestjs/common";
+
+export interface RawGatewayConfig {
+  version: number;
+  server: {
+    port: number;
+    publicBaseUrl?: string;
+  };
+  auth: {
+    apiKeys: Array<{
+      id: string;
+      tokenEnv: string;
+      allowedRoutes: string[];
+    }>;
+  };
+  providers: Record<
+    string,
+    {
+      type: string;
+      apiKeyEnv: string;
+      baseUrl?: string;
+      headers?: Record<string, string>;
+      providerOptions?: Record<string, unknown>;
+    }
+  >;
+  models: Record<
+    string,
+    {
+      provider: string;
+      model: string;
+      role: "orchestrator" | "delegate";
+      capabilities?: string[];
+      defaults?: Record<string, unknown>;
+    }
+  >;
+  routes: Record<
+    string,
+    {
+      publicModel: string;
+      orchestrator: string;
+      allowedDelegateModels: string[];
+      maxDelegations: number;
+      maxDepth: number;
+      timeoutMs: number;
+      delegateTimeoutMs: number;
+      streamFinalOnly: boolean;
+    }
+  >;
+  observability?: {
+    logLevel?: string;
+    redact?: string[];
+  };
+}
 
 export interface GatewayClient {
   id: string;
@@ -10,6 +64,16 @@ export interface PublicModelConfig {
   id: string;
   created: number;
   ownedBy: string;
+}
+
+export interface ProviderConfig {
+  id: string;
+  type: "openrouter";
+  apiKey: string;
+  apiKeyEnv: string;
+  baseUrl: string;
+  headers: Record<string, string>;
+  providerOptions: Record<string, unknown>;
 }
 
 export interface InternalModelConfig {
@@ -37,96 +101,87 @@ export interface ModelAccessPolicy {
   allowedModels: string[];
 }
 
+export interface GatewayConfigServiceOptions {
+  configPath?: string;
+  env?: Record<string, string | undefined>;
+  rawConfig?: RawGatewayConfig;
+}
+
+export const GATEWAY_CONFIG_OPTIONS = "GATEWAY_CONFIG_OPTIONS";
+
+interface RuntimeGatewayConfig {
+  server: {
+    port: number;
+  };
+  clients: GatewayClient[];
+  providers: ProviderConfig[];
+  internalModels: InternalModelConfig[];
+  routes: RouteConfig[];
+  publicModels: PublicModelConfig[];
+}
+
+export class GatewayConfigError extends Error {
+  constructor(
+    readonly path: string,
+    message: string,
+  ) {
+    super(`Invalid Open Fusion config at ${path}: ${message}`);
+  }
+}
+
 @Injectable()
 export class GatewayConfigService {
-  private readonly clients: GatewayClient[] = [
-    {
-      id: "test-client",
-      apiKey: "test-gateway-key",
-      allowedModels: ["route/default"],
-    },
-    {
-      id: "restricted-client",
-      apiKey: "restricted-gateway-key",
-      allowedModels: [],
-    },
-  ];
+  private readonly runtime: RuntimeGatewayConfig;
 
-  private readonly publicModels: PublicModelConfig[] = [
-    {
-      id: "route/default",
-      created: 1710000000,
-      ownedBy: "open-fusion",
-    },
-  ];
+  constructor(
+    @Optional()
+    @Inject(GATEWAY_CONFIG_OPTIONS)
+    options: GatewayConfigServiceOptions = {},
+  ) {
+    const env = options.env ?? process.env;
+    const rawConfig =
+      options.rawConfig ??
+      loadRawConfig(
+        options.configPath ??
+          env.OPEN_FUSION_CONFIG ??
+          "./config/open-fusion.config.json",
+      );
 
-  private readonly internalModels: InternalModelConfig[] = [
-    {
-      id: "orchestrator.default",
-      provider: "openrouter",
-      providerModel: "openai/gpt-4.1",
-      role: "orchestrator",
-      capabilities: ["general"],
-      defaults: {
-        temperature: 0.2,
-      },
-    },
-    {
-      id: "worker.fast",
-      provider: "openrouter",
-      providerModel: "openai/gpt-4.1-mini",
-      role: "delegate",
-      capabilities: ["general", "fast_draft"],
-      defaults: {
-        temperature: 0.3,
-      },
-    },
-    {
-      id: "worker.restricted",
-      provider: "openrouter",
-      providerModel: "openai/gpt-4.1",
-      role: "delegate",
-      capabilities: ["reasoning"],
-      defaults: {
-        temperature: 0.1,
-      },
-    },
-  ];
-
-  private readonly routes: RouteConfig[] = [
-    {
-      id: "default",
-      publicModel: "route/default",
-      orchestrator: "orchestrator.default",
-      allowedDelegateModels: ["worker.fast"],
-      maxDelegations: 3,
-      maxDepth: 1,
-      timeoutMs: 60000,
-      delegateTimeoutMs: 30000,
-      streamFinalOnly: true,
-    },
-  ];
+    this.runtime = validateConfig(rawConfig, env);
+  }
 
   findClientByApiKey(apiKey: string): GatewayClient | undefined {
-    return this.clients.find((client) => client.apiKey === apiKey);
+    return this.runtime.clients.find((client) => client.apiKey === apiKey);
   }
 
   listModelsForClient(client: ModelAccessPolicy): PublicModelConfig[] {
-    return this.publicModels.filter((model) =>
+    return this.runtime.publicModels.filter((model) =>
       client.allowedModels.includes(model.id),
     );
   }
 
+  listPublicModels(): PublicModelConfig[] {
+    return [...this.runtime.publicModels];
+  }
+
   findPublicModel(modelId: string): PublicModelConfig | undefined {
-    return this.publicModels.find((model) => model.id === modelId);
+    return this.runtime.publicModels.find((model) => model.id === modelId);
   }
 
   resolveRouteByPublicModel(publicModel: string): RouteConfig | undefined {
-    return this.routes.find((route) => route.publicModel === publicModel);
+    return this.runtime.routes.find(
+      (route) => route.publicModel === publicModel,
+    );
   }
 
   findInternalModel(modelId: string): InternalModelConfig | undefined {
-    return this.internalModels.find((model) => model.id === modelId);
+    return this.runtime.internalModels.find((model) => model.id === modelId);
+  }
+
+  getProvider(providerId: string): ProviderConfig | undefined {
+    return this.runtime.providers.find(
+      (provider) => provider.id === providerId,
+    );
   }
 
   listAllowedDelegateModels(
@@ -148,16 +203,369 @@ export class GatewayConfigService {
   }
 
   getHttpPort(): number {
-    const rawPort = process.env.PORT;
-    if (!rawPort) {
-      return 3000;
-    }
-
-    const port = Number.parseInt(rawPort, 10);
-    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-      return 3000;
-    }
-
-    return port;
+    return this.runtime.server.port;
   }
+}
+
+function loadRawConfig(configPath: string): RawGatewayConfig {
+  if (!existsSync(configPath)) {
+    throw new GatewayConfigError(
+      "OPEN_FUSION_CONFIG",
+      `config file '${configPath}' was not found`,
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, "utf8"));
+  } catch (error) {
+    throw new GatewayConfigError(
+      "OPEN_FUSION_CONFIG",
+      `config file '${configPath}' is not valid JSON: ${getErrorMessage(error)}`,
+    );
+  }
+
+  if (!isRecord(parsed)) {
+    throw new GatewayConfigError("$", "config must be a JSON object");
+  }
+
+  return parsed as unknown as RawGatewayConfig;
+}
+
+function validateConfig(
+  raw: RawGatewayConfig,
+  env: Record<string, string | undefined>,
+): RuntimeGatewayConfig {
+  validateVersion(raw.version);
+  validatePort(raw.server?.port);
+
+  const providers = validateProviders(raw.providers, env);
+  const providerIds = new Set(providers.map((provider) => provider.id));
+  const internalModels = validateModels(raw.models, providerIds);
+  const modelMap = new Map(internalModels.map((model) => [model.id, model]));
+  const routes = validateRoutes(raw.routes, modelMap);
+  const routeMap = new Map(routes.map((route) => [route.id, route]));
+  const clients = validateClients(raw.auth?.apiKeys, env, routeMap);
+
+  return {
+    server: {
+      port: raw.server.port,
+    },
+    clients,
+    providers,
+    internalModels,
+    routes,
+    publicModels: routes.map((route) => ({
+      id: route.publicModel,
+      created: 1710000000,
+      ownedBy: "open-fusion",
+    })),
+  };
+}
+
+function validateVersion(version: unknown): void {
+  if (version !== 1) {
+    throw new GatewayConfigError("version", "supported version is 1");
+  }
+}
+
+function validatePort(port: unknown): void {
+  if (!Number.isInteger(port) || Number(port) <= 0 || Number(port) > 65535) {
+    throw new GatewayConfigError(
+      "server.port",
+      "must be an integer between 1 and 65535",
+    );
+  }
+}
+
+function validateProviders(
+  rawProviders: RawGatewayConfig["providers"],
+  env: Record<string, string | undefined>,
+): ProviderConfig[] {
+  if (!isRecord(rawProviders)) {
+    throw new GatewayConfigError("providers", "must be an object");
+  }
+
+  return Object.entries(rawProviders).map(([id, provider]) => {
+    if (!isRecord(provider)) {
+      throw new GatewayConfigError(`providers.${id}`, "must be an object");
+    }
+    if (provider.type !== "openrouter") {
+      throw new GatewayConfigError(
+        `providers.${id}.type`,
+        "must be 'openrouter'",
+      );
+    }
+    if (typeof provider.apiKeyEnv !== "string" || provider.apiKeyEnv === "") {
+      throw new GatewayConfigError(
+        `providers.${id}.apiKeyEnv`,
+        "must be a non-empty env var name",
+      );
+    }
+
+    const apiKey = env[provider.apiKeyEnv];
+    if (!apiKey) {
+      throw new GatewayConfigError(
+        `providers.${id}.apiKeyEnv`,
+        `env var '${provider.apiKeyEnv}' is not set`,
+      );
+    }
+
+    return {
+      id,
+      type: "openrouter",
+      apiKey,
+      apiKeyEnv: provider.apiKeyEnv,
+      baseUrl:
+        typeof provider.baseUrl === "string" && provider.baseUrl !== ""
+          ? provider.baseUrl
+          : "https://openrouter.ai/api/v1",
+      headers: validateStringRecord(
+        provider.headers,
+        `providers.${id}.headers`,
+      ),
+      providerOptions: isRecord(provider.providerOptions)
+        ? provider.providerOptions
+        : {},
+    };
+  });
+}
+
+function validateModels(
+  rawModels: RawGatewayConfig["models"],
+  providerIds: Set<string>,
+): InternalModelConfig[] {
+  if (!isRecord(rawModels)) {
+    throw new GatewayConfigError("models", "must be an object");
+  }
+
+  return Object.entries(rawModels).map(([id, model]) => {
+    if (!isRecord(model)) {
+      throw new GatewayConfigError(`models.${id}`, "must be an object");
+    }
+    if (
+      typeof model.provider !== "string" ||
+      !providerIds.has(model.provider)
+    ) {
+      throw new GatewayConfigError(
+        `models.${id}.provider`,
+        "must reference an existing provider",
+      );
+    }
+    if (typeof model.model !== "string" || model.model === "") {
+      throw new GatewayConfigError(
+        `models.${id}.model`,
+        "must be a non-empty provider model id",
+      );
+    }
+    if (model.role !== "orchestrator" && model.role !== "delegate") {
+      throw new GatewayConfigError(
+        `models.${id}.role`,
+        "must be 'orchestrator' or 'delegate'",
+      );
+    }
+
+    return {
+      id,
+      provider: model.provider,
+      providerModel: model.model,
+      role: model.role,
+      capabilities: validateStringArray(
+        model.capabilities ?? [],
+        `models.${id}.capabilities`,
+      ),
+      defaults: isRecord(model.defaults) ? model.defaults : {},
+    };
+  });
+}
+
+function validateRoutes(
+  rawRoutes: RawGatewayConfig["routes"],
+  models: Map<string, InternalModelConfig>,
+): RouteConfig[] {
+  if (!isRecord(rawRoutes)) {
+    throw new GatewayConfigError("routes", "must be an object");
+  }
+
+  return Object.entries(rawRoutes).map(([id, route]) => {
+    if (!isRecord(route)) {
+      throw new GatewayConfigError(`routes.${id}`, "must be an object");
+    }
+    if (typeof route.publicModel !== "string" || route.publicModel === "") {
+      throw new GatewayConfigError(
+        `routes.${id}.publicModel`,
+        "must be a non-empty public model id",
+      );
+    }
+
+    const orchestrator = models.get(String(route.orchestrator));
+    if (!orchestrator || orchestrator.role !== "orchestrator") {
+      throw new GatewayConfigError(
+        `routes.${id}.orchestrator`,
+        "must reference an orchestrator model",
+      );
+    }
+
+    const allowedDelegateModels = validateStringArray(
+      route.allowedDelegateModels,
+      `routes.${id}.allowedDelegateModels`,
+    );
+    allowedDelegateModels.forEach((modelId, index) => {
+      const delegate = models.get(modelId);
+      if (!delegate || delegate.role !== "delegate") {
+        throw new GatewayConfigError(
+          `routes.${id}.allowedDelegateModels[${index}]`,
+          "must reference a delegate model",
+        );
+      }
+    });
+
+    validatePositiveInteger(
+      route.maxDelegations,
+      `routes.${id}.maxDelegations`,
+    );
+    validatePositiveInteger(route.timeoutMs, `routes.${id}.timeoutMs`);
+    validatePositiveInteger(
+      route.delegateTimeoutMs,
+      `routes.${id}.delegateTimeoutMs`,
+    );
+    if (route.maxDepth !== 1) {
+      throw new GatewayConfigError(
+        `routes.${id}.maxDepth`,
+        "must be 1 for the MVP",
+      );
+    }
+    if (typeof route.streamFinalOnly !== "boolean") {
+      throw new GatewayConfigError(
+        `routes.${id}.streamFinalOnly`,
+        "must be a boolean",
+      );
+    }
+
+    return {
+      id,
+      publicModel: route.publicModel,
+      orchestrator: route.orchestrator,
+      allowedDelegateModels,
+      maxDelegations: route.maxDelegations,
+      maxDepth: route.maxDepth,
+      timeoutMs: route.timeoutMs,
+      delegateTimeoutMs: route.delegateTimeoutMs,
+      streamFinalOnly: route.streamFinalOnly,
+    };
+  });
+}
+
+function validateClients(
+  apiKeys: RawGatewayConfig["auth"]["apiKeys"],
+  env: Record<string, string | undefined>,
+  routes: Map<string, RouteConfig>,
+): GatewayClient[] {
+  if (!Array.isArray(apiKeys) || apiKeys.length === 0) {
+    throw new GatewayConfigError("auth.apiKeys", "must be a non-empty array");
+  }
+
+  return apiKeys.map((client, index) => {
+    if (!isRecord(client)) {
+      throw new GatewayConfigError(
+        `auth.apiKeys[${index}]`,
+        "must be an object",
+      );
+    }
+    if (typeof client.id !== "string" || client.id === "") {
+      throw new GatewayConfigError(
+        `auth.apiKeys[${index}].id`,
+        "must be a non-empty string",
+      );
+    }
+    if (typeof client.tokenEnv !== "string" || client.tokenEnv === "") {
+      throw new GatewayConfigError(
+        `auth.apiKeys[${index}].tokenEnv`,
+        "must be a non-empty env var name",
+      );
+    }
+
+    const apiKey = env[client.tokenEnv];
+    if (!apiKey) {
+      throw new GatewayConfigError(
+        `auth.apiKeys[${index}].tokenEnv`,
+        `env var '${client.tokenEnv}' is not set`,
+      );
+    }
+
+    const allowedRoutes = validateStringArray(
+      client.allowedRoutes,
+      `auth.apiKeys[${index}].allowedRoutes`,
+    );
+    const allowedModels = allowedRoutes.map((routeId, routeIndex) => {
+      const route = routes.get(routeId);
+      if (!route) {
+        throw new GatewayConfigError(
+          `auth.apiKeys[${index}].allowedRoutes[${routeIndex}]`,
+          "must reference an existing route",
+        );
+      }
+
+      return route.publicModel;
+    });
+
+    return {
+      id: client.id,
+      apiKey,
+      allowedModels,
+    };
+  });
+}
+
+function validatePositiveInteger(value: unknown, path: string): void {
+  if (!Number.isInteger(value) || Number(value) <= 0) {
+    throw new GatewayConfigError(path, "must be a positive integer");
+  }
+}
+
+function validateStringArray(value: unknown, path: string): string[] {
+  if (!Array.isArray(value)) {
+    throw new GatewayConfigError(path, "must be an array of strings");
+  }
+
+  return value.map((item, index) => {
+    if (typeof item !== "string" || item === "") {
+      throw new GatewayConfigError(
+        `${path}[${index}]`,
+        "must be a non-empty string",
+      );
+    }
+
+    return item;
+  });
+}
+
+function validateStringRecord(
+  value: unknown,
+  path: string,
+): Record<string, string> {
+  if (value === undefined) {
+    return {};
+  }
+  if (!isRecord(value)) {
+    throw new GatewayConfigError(path, "must be an object");
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => {
+      if (typeof item !== "string") {
+        throw new GatewayConfigError(`${path}.${key}`, "must be a string");
+      }
+
+      return [key, item];
+    }),
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

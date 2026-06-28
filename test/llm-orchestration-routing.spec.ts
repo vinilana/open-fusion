@@ -7,6 +7,7 @@ import {
 } from "../src/orchestration/llm-generation.port";
 import { OrchestrationService } from "../src/orchestration/orchestration.service";
 import { ChatCompletionRequest } from "../src/v1/openai-types";
+import { minimalConfig, validEnv } from "./support/gateway-config.fixture";
 
 class ScriptedGenerationPort implements LlmGenerationPort {
   readonly requests: LlmGenerateRequest[] = [];
@@ -38,10 +39,7 @@ describe("LLM orchestration routing", () => {
         finishReason: "stop",
       },
     ]);
-    const service = new OrchestrationService(
-      new GatewayConfigService(),
-      generation,
-    );
+    const service = new OrchestrationService(createConfigService(), generation);
 
     const response = await service.run(createRequest(routeModel, "hello"));
 
@@ -87,10 +85,7 @@ describe("LLM orchestration routing", () => {
         finishReason: "stop",
       },
     ]);
-    const service = new OrchestrationService(
-      new GatewayConfigService(),
-      generation,
-    );
+    const service = new OrchestrationService(createConfigService(), generation);
 
     const response = await service.run(createRequest(routeModel, "hello"));
 
@@ -135,10 +130,7 @@ describe("LLM orchestration routing", () => {
         finishReason: "stop",
       },
     ]);
-    const service = new OrchestrationService(
-      new GatewayConfigService(),
-      generation,
-    );
+    const service = new OrchestrationService(createConfigService(), generation);
 
     const response = await service.run(createRequest(routeModel, "hello"));
 
@@ -200,10 +192,7 @@ describe("LLM orchestration routing", () => {
       { content: "second", finishReason: "stop" },
       { content: "third", finishReason: "stop" },
     ]);
-    const service = new OrchestrationService(
-      new GatewayConfigService(),
-      generation,
-    );
+    const service = new OrchestrationService(createConfigService(), generation);
 
     await expect(
       service.run(createRequest(routeModel, "hello")),
@@ -273,7 +262,21 @@ function createRequest(model: string, content: string): ChatCompletionRequest {
   };
 }
 
+function createConfigService(): GatewayConfigService {
+  return new GatewayConfigService({
+    rawConfig: minimalConfig(),
+    env: validEnv(),
+  });
+}
+
 class FastTimeoutConfigService extends GatewayConfigService {
+  constructor() {
+    super({
+      rawConfig: minimalConfig(),
+      env: validEnv(),
+    });
+  }
+
   override resolveRouteByPublicModel(publicModel: string) {
     const route = super.resolveRouteByPublicModel(publicModel);
     if (!route) {

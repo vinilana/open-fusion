@@ -6,8 +6,8 @@
   "license": "UNLICENSED",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "format": "prettier --check \"{src,test}/**/*.ts\" \"*.json\"",
-    "format:write": "prettier --write \"{src,test}/**/*.ts\" \"*.json\"",
+    "format": "prettier --check \"{src,test}/**/*.ts\" \"*.json\" \"config/**/*.json\"",
+    "format:write": "prettier --write \"{src,test}/**/*.ts\" \"*.json\" \"config/**/*.json\"",
     "lint": "eslint \"{src,test}/**/*.ts\"",
     "start": "node dist/main.js",
     "start:dev": "ts-node src/main.ts",
