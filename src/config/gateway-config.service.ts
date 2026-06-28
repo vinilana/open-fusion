@@ -2,8 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 
 import { Inject, Injectable, Optional } from "@nestjs/common";
 
-import { hasCanonicalRoutingCapability } from "../routing/routing-capabilities";
-
 export interface RawGatewayConfig {
   version: number;
   server: {
@@ -211,7 +209,7 @@ export class GatewayConfigService {
       return [
         {
           id: model.id,
-          capabilities: model.capabilities,
+          capabilities: [...model.capabilities],
         },
       ];
     });
@@ -559,30 +557,6 @@ function validateRoutes(
         `routes.${id}.streamFinalOnly`,
         "must be a boolean",
       );
-    }
-    if (route.streamFinalOnly) {
-      let hasGeneralDelegate = false;
-      allowedDelegateModels.forEach((modelId, index) => {
-        const delegate = models.get(modelId);
-        if (!delegate) {
-          return;
-        }
-        if (!hasCanonicalRoutingCapability(delegate.capabilities)) {
-          throw new GatewayConfigError(
-            `routes.${id}.allowedDelegateModels[${index}]`,
-            "routed streaming delegates must declare at least one canonical capability: plan, code, review, design, or general",
-          );
-        }
-        if (delegate.capabilities.includes("general")) {
-          hasGeneralDelegate = true;
-        }
-      });
-      if (!hasGeneralDelegate) {
-        throw new GatewayConfigError(
-          `routes.${id}.allowedDelegateModels`,
-          "routed streaming routes must include at least one allowed delegate with the 'general' capability",
-        );
-      }
     }
     if (
       route.allowClientTools !== undefined &&
