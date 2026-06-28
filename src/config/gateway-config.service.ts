@@ -220,6 +220,14 @@ export class GatewayConfigService {
   getHttpPort(): number {
     return this.runtime.server.port;
   }
+
+  getMaxPayloadBytes(): number {
+    return this.runtime.routes.reduce(
+      (maxPayloadBytes, route) =>
+        Math.max(maxPayloadBytes, route.maxPayloadBytes),
+      0,
+    );
+  }
 }
 
 function resolveConfigEnvironment(

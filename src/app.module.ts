@@ -1,10 +1,9 @@
-import { MiddlewareConsumer, Module, NestModule } from "@nestjs/common";
+import { Module } from "@nestjs/common";
 import { APP_FILTER, APP_GUARD } from "@nestjs/core";
 
 import { AuthGuard } from "./auth/auth.guard";
 import { ConfigModule } from "./config/config.module";
 import { OpenAiErrorFilter } from "./errors/openai-error.filter";
-import { RequestIdMiddleware } from "./request-id/request-id.middleware";
 import { V1Module } from "./v1/v1.module";
 
 @Module({
@@ -20,8 +19,4 @@ import { V1Module } from "./v1/v1.module";
     },
   ],
 })
-export class AppModule implements NestModule {
-  configure(consumer: MiddlewareConsumer): void {
-    consumer.apply(RequestIdMiddleware).forRoutes("*");
-  }
-}
+export class AppModule {}
