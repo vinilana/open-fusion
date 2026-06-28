@@ -19,6 +19,8 @@
     "@nestjs/common": "^11.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-express": "^11.0.0",
+    "@openrouter/ai-sdk-provider": "^2.9.1",
+    "ai": "^6.0.209",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },
