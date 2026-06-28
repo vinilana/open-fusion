@@ -11,7 +11,7 @@ export function configureHttpApp(app: INestApplication): void {
   const config = app.get(GatewayConfigService);
   app.use(
     json({
-      limit: config.getMaxPayloadBytes(),
+      limit: config.getHttpMaxPayloadBytes(),
     }),
   );
 }

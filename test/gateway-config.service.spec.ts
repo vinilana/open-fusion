@@ -88,6 +88,61 @@ describe("GatewayConfigService", () => {
     });
   });
 
+  it("loads an explicit global HTTP payload parser limit", () => {
+    const rawConfig = minimalConfig();
+    rawConfig.server.maxPayloadBytes = 2048;
+    rawConfig.routes.default.maxPayloadBytes = 65536;
+
+    const config = new GatewayConfigService({
+      rawConfig,
+      env: validEnv(),
+    });
+
+    expect(config.getHttpMaxPayloadBytes()).toBe(2048);
+    expect(config.resolveRouteByPublicModel("route/default")).toMatchObject({
+      maxPayloadBytes: 65536,
+    });
+  });
+
+  it("loads configured redaction keys with env-name variants", () => {
+    const rawConfig = minimalConfig();
+    rawConfig.observability = {
+      logLevel: "info",
+      redact: ["apiKey", "token", "authorization", "customSecret"],
+    };
+
+    const config = new GatewayConfigService({
+      rawConfig,
+      env: validEnv(),
+    });
+
+    expect(config.getRedactionKeys()).toEqual(
+      expect.arrayContaining([
+        "apiKey",
+        "apiKeyEnv",
+        "token",
+        "tokenEnv",
+        "authorization",
+        "customSecret",
+        "customSecretEnv",
+      ]),
+    );
+  });
+
+  it("rejects invalid global HTTP payload parser limits", () => {
+    const config = minimalConfig();
+    config.server.maxPayloadBytes = 0;
+
+    expectConfigErrorAt(
+      () =>
+        new GatewayConfigService({
+          rawConfig: config,
+          env: validEnv(),
+        }),
+      "server.maxPayloadBytes",
+    );
+  });
+
   it.each([["maxMessages"], ["maxMessageContentLength"], ["maxPayloadBytes"]])(
     "rejects invalid route limit %s",
     (field) => {

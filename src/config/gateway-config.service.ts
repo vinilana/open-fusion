@@ -7,6 +7,7 @@ export interface RawGatewayConfig {
   server: {
     port: number;
     publicBaseUrl?: string;
+    maxPayloadBytes?: number;
   };
   auth: {
     apiKeys: Array<{
@@ -123,10 +124,15 @@ export const GATEWAY_CONFIG_OPTIONS = "GATEWAY_CONFIG_OPTIONS";
 const DEFAULT_MAX_MESSAGES = 128;
 const DEFAULT_MAX_MESSAGE_CONTENT_LENGTH = 32768;
 const DEFAULT_MAX_PAYLOAD_BYTES = 1048576;
+const DEFAULT_REDACTION_KEYS = ["authorization", "apiKey", "api_key", "token"];
 
 interface RuntimeGatewayConfig {
   server: {
     port: number;
+    maxPayloadBytes: number;
+  };
+  observability: {
+    redactionKeys: string[];
   };
   clients: GatewayClient[];
   providers: ProviderConfig[];
@@ -227,6 +233,14 @@ export class GatewayConfigService {
         Math.max(maxPayloadBytes, route.maxPayloadBytes),
       0,
     );
+  }
+
+  getHttpMaxPayloadBytes(): number {
+    return this.runtime.server.maxPayloadBytes;
+  }
+
+  getRedactionKeys(): string[] {
+    return [...this.runtime.observability.redactionKeys];
   }
 }
 
@@ -354,6 +368,14 @@ function validateConfig(
   return {
     server: {
       port: raw.server.port,
+      maxPayloadBytes: validateOptionalPositiveInteger(
+        raw.server.maxPayloadBytes,
+        "server.maxPayloadBytes",
+        maxRoutePayloadBytes(routes),
+      ),
+    },
+    observability: {
+      redactionKeys: normalizeRedactionKeys(raw.observability?.redact),
     },
     clients,
     providers,
@@ -365,6 +387,31 @@ function validateConfig(
       ownedBy: "open-fusion",
     })),
   };
+}
+
+function maxRoutePayloadBytes(routes: RouteConfig[]): number {
+  return routes.reduce(
+    (maxPayloadBytes, route) =>
+      Math.max(maxPayloadBytes, route.maxPayloadBytes),
+    0,
+  );
+}
+
+function normalizeRedactionKeys(value: unknown): string[] {
+  const configured =
+    value === undefined
+      ? []
+      : validateStringArray(value, "observability.redact");
+  const keys = new Set<string>();
+
+  [...DEFAULT_REDACTION_KEYS, ...configured].forEach((key) => {
+    keys.add(key);
+    if (!key.toLowerCase().endsWith("env")) {
+      keys.add(`${key}Env`);
+    }
+  });
+
+  return [...keys];
 }
 
 function validateVersion(version: unknown): void {

@@ -90,6 +90,7 @@ O MVP deve entregar:
 - [Spec 006: Routed streaming with internal delegations](./specs/006-streaming-final-with-internal-delegations.md)
 - [Spec 007: Match de capabilities pelo orquestrador](./specs/007-orchestrator-capability-matching.md)
 - [Spec 008: Observabilidade, resiliencia e seguranca](./specs/008-observability-resilience-security.md)
+- [Spec 009: Hardening operacional apos revisao critica](./specs/009-critical-review-operational-hardening.md)
 
 ## 10. Referencias de ADR
 

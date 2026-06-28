@@ -13,6 +13,7 @@ export class RequestIdMiddleware implements NestMiddleware {
     const requestId = this.isValidRequestId(incoming) ? incoming : randomUUID();
 
     request.requestId = requestId;
+    request.startedAt = Date.now();
     response.setHeader("x-request-id", requestId);
     next();
   }

@@ -25,6 +25,7 @@ import {
   LlmGenerationPort,
   LlmInvocationRole,
   LlmUsage,
+  ROUTING_DECISION_VALIDATION_PUBLIC_MESSAGE,
   RoutingDecision,
   RoutingDecisionPreFinalTask,
   normalizeRoutingDecision,
@@ -70,6 +71,11 @@ interface StreamingExecutionGraph {
   finalTarget: StreamingFinalTarget;
   delegationAttemptCount: number;
 }
+
+const ROUTING_LIMIT_PUBLIC_MESSAGE =
+  "Routing decision exceeded configured delegation limits.";
+const PREFINAL_EXECUTION_PUBLIC_MESSAGE =
+  "Routing decision failed before final streaming.";
 
 @Injectable()
 export class OrchestrationService {
@@ -165,7 +171,7 @@ export class OrchestrationService {
       return;
     }
 
-    const synthesisTimeoutMs = remainingMs(deadline, route);
+    const synthesisTimeoutMs = remainingMs(deadline);
 
     const synthesisStartedAt = Date.now();
     const synthesisLogContext = this.createInvocationLogContext({
@@ -177,6 +183,8 @@ export class OrchestrationService {
       role: "orchestrator",
       startedAt: synthesisStartedAt,
     });
+
+    const abortController = new AbortController();
 
     try {
       for await (const chunk of streamWithDeadline(
@@ -195,9 +203,10 @@ export class OrchestrationService {
               : undefined,
           streamFinalOnly: context.streamFinalOnly ?? route.streamFinalOnly,
           timeoutMs: synthesisTimeoutMs,
+          abortSignal: abortController.signal,
         }),
         deadline,
-        route,
+        abortController,
       )) {
         if (chunk.content !== "") {
           yield {
@@ -229,6 +238,8 @@ export class OrchestrationService {
     } catch (error) {
       this.logInvocationFailed(synthesisLogContext, error);
       throw error;
+    } finally {
+      abortController.abort();
     }
   }
 
@@ -244,7 +255,7 @@ export class OrchestrationService {
       throw OpenAiHttpError.internal();
     }
 
-    const orchestratorTimeoutMs = remainingMs(deadline, route);
+    const orchestratorTimeoutMs = remainingMs(deadline);
     const planningLogContext = this.createInvocationLogContext({
       phase: "orchestrator_planning",
       requestId: context.requestId,
@@ -255,6 +266,54 @@ export class OrchestrationService {
       startedAt: Date.now(),
     });
 
+    try {
+      const normalizedDecision = await this.generateNormalizedRoutingDecision(
+        generateRoutingDecision,
+        request,
+        context,
+        route,
+        delegateModels,
+        orchestratorTimeoutMs,
+        false,
+      );
+      if (normalizedDecision) {
+        this.logInvocationCompleted(planningLogContext, {});
+        return normalizedDecision;
+      }
+
+      const repairedDecision = await this.generateNormalizedRoutingDecision(
+        generateRoutingDecision,
+        request,
+        context,
+        route,
+        delegateModels,
+        remainingMs(deadline),
+        true,
+      );
+      if (!repairedDecision) {
+        throw routingDecisionValidationError();
+      }
+
+      this.logInvocationCompleted(planningLogContext, {});
+      return repairedDecision;
+    } catch (error) {
+      this.logInvocationFailed(planningLogContext, error);
+      throw error;
+    }
+  }
+
+  private async generateNormalizedRoutingDecision(
+    generateRoutingDecision: NonNullable<
+      LlmGenerationPort["generateRoutingDecision"]
+    >,
+    request: ChatCompletionRequest,
+    context: OrchestrationRunContext,
+    route: RouteConfig,
+    delegateModels: DelegateModelContext[],
+    timeoutMs: number,
+    repair: boolean,
+  ): Promise<RoutingDecision | undefined> {
+    const abortController = new AbortController();
     try {
       const routingDecision = await withTimeout(
         generateRoutingDecision.call(this.generation, {
@@ -267,23 +326,26 @@ export class OrchestrationService {
           system: buildStreamingRoutingDecisionSystemPrompt(
             route,
             delegateModels,
+            { repair },
           ),
           delegateModels,
-          timeoutMs: orchestratorTimeoutMs,
+          timeoutMs,
+          abortSignal: abortController.signal,
         }),
-        orchestratorTimeoutMs,
-        `Route '${route.id}' timed out.`,
+        timeoutMs,
+        "The request timed out.",
+        { abortController },
       );
-      const normalizedDecision = normalizeRoutingDecision(routingDecision);
-      if (!normalizedDecision) {
-        throw OpenAiHttpError.providerError("Malformed routing decision.");
+
+      return normalizeRoutingDecision(routingDecision);
+    } catch (error) {
+      if (isRoutingDecisionValidationError(error)) {
+        return undefined;
       }
 
-      this.logInvocationCompleted(planningLogContext, {});
-      return normalizedDecision;
-    } catch (error) {
-      this.logInvocationFailed(planningLogContext, error);
       throw error;
+    } finally {
+      abortController.abort();
     }
   }
 
@@ -351,8 +413,10 @@ export class OrchestrationService {
 
     const delegateTimeoutMs = Math.min(
       route.delegateTimeoutMs,
-      remainingMs(deadline, route),
+      remainingMs(deadline),
     );
+
+    const abortController = new AbortController();
 
     try {
       for await (const chunk of streamWithDeadline(
@@ -367,9 +431,10 @@ export class OrchestrationService {
           toolResults: toolResults.length > 0 ? toolResults : undefined,
           streamFinalOnly: route.streamFinalOnly,
           timeoutMs: delegateTimeoutMs,
+          abortSignal: abortController.signal,
         }),
         Date.now() + delegateTimeoutMs,
-        route,
+        abortController,
       )) {
         if (chunk.content !== "") {
           yield {
@@ -401,6 +466,8 @@ export class OrchestrationService {
     } catch (error) {
       this.logInvocationFailed(logContext, error);
       throw error;
+    } finally {
+      abortController.abort();
     }
   }
 
@@ -420,7 +487,7 @@ export class OrchestrationService {
     let delegations = 0;
 
     while (true) {
-      const orchestratorTimeoutMs = remainingMs(deadline, route);
+      const orchestratorTimeoutMs = remainingMs(deadline);
       const canDelegate =
         delegations < route.maxDelegations && !hasDelegateErrors(toolResults);
       const planningLogContext = this.createInvocationLogContext({
@@ -454,7 +521,7 @@ export class OrchestrationService {
             timeoutMs: orchestratorTimeoutMs,
           }),
           orchestratorTimeoutMs,
-          `Route '${route.id}' timed out.`,
+          "The request timed out.",
         );
         this.logInvocationCompleted(planningLogContext, {
           finishReason: orchestratorResult.finishReason,
@@ -493,7 +560,7 @@ export class OrchestrationService {
 
         if (delegations >= route.maxDelegations) {
           throw OpenAiHttpError.invalidRequest(
-            `Route '${route.id}' exceeded maxDelegations (${route.maxDelegations}).`,
+            ROUTING_LIMIT_PUBLIC_MESSAGE,
             "maxDelegations",
           );
         }
@@ -533,9 +600,7 @@ export class OrchestrationService {
         task.dependencies.every((dependency) => completed.has(dependency)),
       );
       if (ready.length === 0) {
-        throw OpenAiHttpError.providerError(
-          "Validated execution graph could not make progress.",
-        );
+        throw routingDecisionValidationError();
       }
       parallelBatchCount += 1;
       maxParallelTasks = Math.max(maxParallelTasks, ready.length);
@@ -602,7 +667,7 @@ export class OrchestrationService {
       const pendingIndex = pending.findIndex(
         (item) => item.index === completed.index,
       );
-      const [finished] = pending.splice(pendingIndex, 1);
+      pending.splice(pendingIndex, 1);
 
       if ("error" in completed) {
         abortPendingDelegateCalls(pending);
@@ -610,9 +675,7 @@ export class OrchestrationService {
       }
       if (completed.result.status !== "success") {
         abortPendingDelegateCalls(pending);
-        throw OpenAiHttpError.providerError(
-          `Pre-final agent task '${finished.task.id}' failed before final streaming.`,
-        );
+        throw OpenAiHttpError.providerError(PREFINAL_EXECUTION_PUBLIC_MESSAGE);
       }
 
       results[completed.index] = completed.result;
@@ -664,7 +727,7 @@ export class OrchestrationService {
 
     const delegateTimeoutMs = Math.min(
       route.delegateTimeoutMs,
-      remainingMs(deadline, route),
+      remainingMs(deadline),
     );
 
     let delegateResult: LlmGenerateResult;
@@ -713,7 +776,10 @@ export class OrchestrationService {
       targetModel,
       task,
       status: "success",
-      content: redactSensitive(delegateResult.content),
+      content: redactSensitive(
+        delegateResult.content,
+        this.config.getRedactionKeys(),
+      ),
       finishReason: delegateResult.finishReason,
       usage: delegateResult.usage,
       latencyMs: elapsedMs(startedAt),
@@ -858,9 +924,7 @@ function buildDependencyToolResults(
   return task.dependencies.map((dependency) => {
     const dependencyResult = resultByTaskId.get(dependency);
     if (!dependencyResult) {
-      throw OpenAiHttpError.providerError(
-        `Execution graph dependency '${dependency}' was not available for task '${task.id}'.`,
-      );
+      throw routingDecisionValidationError();
     }
 
     return dependencyResult;
@@ -967,7 +1031,7 @@ function validateStreamingExecutionGraph(
 ): void {
   if (graph.delegationAttemptCount > route.maxDelegations) {
     throw OpenAiHttpError.invalidRequest(
-      `Route '${route.id}' exceeded maxDelegations (${route.maxDelegations}).`,
+      ROUTING_LIMIT_PUBLIC_MESSAGE,
       "maxDelegations",
     );
   }
@@ -975,14 +1039,10 @@ function validateStreamingExecutionGraph(
   const taskIds = new Set<string>();
   graph.preFinalTasks.forEach((task) => {
     if (task.id === "") {
-      throw OpenAiHttpError.providerError(
-        "Execution graph contains an agent task without an id.",
-      );
+      throw routingDecisionValidationError();
     }
     if (taskIds.has(task.id)) {
-      throw OpenAiHttpError.providerError(
-        `Execution graph contains duplicate agent task id '${task.id}'.`,
-      );
+      throw routingDecisionValidationError();
     }
     taskIds.add(task.id);
     const delegate = validateDelegateTarget(
@@ -990,44 +1050,30 @@ function validateStreamingExecutionGraph(
       delegateModels,
       task.toolCall.arguments.target_model,
     );
-    validateMatchedCapability(
-      delegate,
-      task.matchedCapability,
-      task.toolCall.arguments.target_model,
-    );
+    validateMatchedCapability(delegate, task.matchedCapability);
   });
 
   graph.preFinalTasks.forEach((task) => {
     task.dependencies.forEach((dependency) => {
       if (!taskIds.has(dependency)) {
-        throw OpenAiHttpError.providerError(
-          `Execution graph task '${task.id}' depends on unknown task '${dependency}'.`,
-        );
+        throw routingDecisionValidationError();
       }
     });
   });
 
   if (hasCycle(graph.preFinalTasks)) {
-    throw OpenAiHttpError.providerError(
-      "Execution graph contains a cycle between agent tasks.",
-    );
+    throw routingDecisionValidationError();
   }
 
   if (graph.finalTarget.kind === "delegate") {
     const targetModel = graph.finalTarget.toolCall.arguments.target_model;
     const delegate = validateDelegateTarget(route, delegateModels, targetModel);
-    validateMatchedCapability(
-      delegate,
-      graph.finalTarget.matchedCapability,
-      targetModel,
-    );
+    validateMatchedCapability(delegate, graph.finalTarget.matchedCapability);
     return;
   }
 
   if (!route.allowOrchestratorFallback) {
-    throw OpenAiHttpError.providerError(
-      "Routing decision selected orchestrator_fallback, but this route does not allow it.",
-    );
+    throw routingDecisionValidationError();
   }
 }
 
@@ -1037,16 +1083,12 @@ function validateDelegateTarget(
   targetModel: string,
 ): DelegateModelContext {
   if (!route.allowedDelegateModels.includes(targetModel)) {
-    throw OpenAiHttpError.providerError(
-      `Execution graph selected delegate model '${targetModel}' that is not allowed for this route.`,
-    );
+    throw routingDecisionValidationError();
   }
 
   const delegate = delegateModels.find((model) => model.id === targetModel);
   if (!delegate) {
-    throw OpenAiHttpError.providerError(
-      `Execution graph selected delegate model '${targetModel}' that is not configured for this route.`,
-    );
+    throw routingDecisionValidationError();
   }
 
   return delegate;
@@ -1055,13 +1097,24 @@ function validateDelegateTarget(
 function validateMatchedCapability(
   delegate: DelegateModelContext,
   matchedCapability: string,
-  targetModel: string,
 ): void {
   if (!delegate.capabilities.includes(matchedCapability)) {
-    throw OpenAiHttpError.providerError(
-      `Target '${targetModel}' does not declare matched capability '${matchedCapability}'.`,
-    );
+    throw routingDecisionValidationError();
   }
+}
+
+function routingDecisionValidationError(): OpenAiHttpError {
+  return OpenAiHttpError.providerError(
+    ROUTING_DECISION_VALIDATION_PUBLIC_MESSAGE,
+  );
+}
+
+function isRoutingDecisionValidationError(error: unknown): boolean {
+  return (
+    error instanceof OpenAiHttpError &&
+    error.code === "provider_error" &&
+    error.message === ROUTING_DECISION_VALIDATION_PUBLIC_MESSAGE
+  );
 }
 
 function hasCycle(tasks: InternalAgentTask[]): boolean {
@@ -1129,8 +1182,9 @@ function buildOrchestratorSystemPrompt(
 function buildStreamingRoutingDecisionSystemPrompt(
   route: RouteConfig,
   delegateModels: DelegateModelContext[],
+  options: { repair?: boolean } = {},
 ): string {
-  return [
+  const instructions = [
     buildOrchestratorSystemPrompt(route, delegateModels),
     "For streaming requests, make the capability match and routing decision through the structured output schema provided by the gateway.",
     `Select exactly one final_target: an allowed delegate with one of its declared capabilities${
@@ -1141,7 +1195,15 @@ function buildStreamingRoutingDecisionSystemPrompt(
     "When selecting a delegate, set matched_capability to a capability declared by that exact target_model.",
     "Optionally include pre_final_tasks only when independent internal context is useful before the final stream.",
     "Do not expose routing reasons, capabilities, internal tasks, or delegate outputs to the client.",
-  ].join(" ");
+  ];
+
+  if (options.repair) {
+    instructions.push(
+      "The previous structured routing decision was malformed. Return one valid decision through the same structured output schema, not text.",
+    );
+  }
+
+  return instructions.join(" ");
 }
 
 function buildFinalSynthesisSystemPrompt(route: RouteConfig): string {
@@ -1218,10 +1280,10 @@ function elapsedMs(startedAt: number): number {
   return Math.max(0, Date.now() - startedAt);
 }
 
-function remainingMs(deadline: number, route: RouteConfig): number {
+function remainingMs(deadline: number): number {
   const remaining = deadline - Date.now();
   if (remaining <= 0) {
-    throw OpenAiHttpError.timeout(`Route '${route.id}' timed out.`);
+    throw OpenAiHttpError.timeout();
   }
 
   return remaining;
@@ -1230,7 +1292,7 @@ function remainingMs(deadline: number, route: RouteConfig): number {
 async function* streamWithDeadline<T>(
   stream: AsyncIterable<T>,
   deadline: number,
-  route: RouteConfig,
+  abortController?: AbortController,
 ): AsyncIterable<T> {
   const iterator = stream[Symbol.asyncIterator]();
 
@@ -1238,8 +1300,9 @@ async function* streamWithDeadline<T>(
     while (true) {
       const next = await withTimeout(
         iterator.next(),
-        remainingMs(deadline, route),
-        `Route '${route.id}' timed out.`,
+        remainingMs(deadline),
+        "The request timed out.",
+        { abortController },
       );
       if (next.done) {
         return;
@@ -1250,6 +1313,8 @@ async function* streamWithDeadline<T>(
   } catch (error) {
     await iterator.return?.().catch(() => undefined);
     throw error;
+  } finally {
+    abortController?.abort();
   }
 }
 
@@ -1257,10 +1322,12 @@ function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
   message: string,
+  options: { abortController?: AbortController } = {},
 ): Promise<T> {
   let timeout: ReturnType<typeof setTimeout>;
   const timeoutPromise = new Promise<never>((_resolve, reject) => {
     timeout = setTimeout(() => {
+      options.abortController?.abort();
       reject(OpenAiHttpError.timeout(message));
     }, timeoutMs);
   });

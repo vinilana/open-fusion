@@ -2,7 +2,8 @@
   "version": 1,
   "server": {
     "port": 3000,
-    "publicBaseUrl": "http://localhost:3000"
+    "publicBaseUrl": "http://localhost:3000",
+    "maxPayloadBytes": 1048576
   },
   "auth": {
     "apiKeys": [

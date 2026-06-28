@@ -6,6 +6,7 @@ import {
   LlmGenerationPort,
   LlmRoutingDecisionRequest,
   LlmStreamChunk,
+  ROUTING_DECISION_VALIDATION_PUBLIC_MESSAGE,
   RoutingDecision,
 } from "../src/orchestration/llm-generation.port";
 import { OrchestrationService } from "../src/orchestration/orchestration.service";
@@ -95,6 +96,10 @@ class CapturingOperationalLogger {
 
   logChatCompletion(): void {
     throw new Error("Chat completion logs are not expected in this unit test.");
+  }
+
+  logHttpRequest(): void {
+    throw new Error("HTTP request logs are not expected in this unit test.");
   }
 
   normalizeError(error: unknown) {
@@ -237,6 +242,60 @@ class SlowFinalStreamGenerationPort implements LlmGenerationPort {
       content: "",
       finishReason: "stop",
     };
+  }
+}
+
+class NeverResolvingRoutingDecisionGenerationPort implements LlmGenerationPort {
+  readonly requests: LlmGenerateRequest[] = [];
+  readonly routingDecisionRequests: LlmRoutingDecisionRequest[] = [];
+  readonly streamRequests: LlmGenerateRequest[] = [];
+
+  async generateRoutingDecision(
+    request: LlmRoutingDecisionRequest,
+  ): Promise<RoutingDecision> {
+    this.routingDecisionRequests.push(request);
+    return new Promise<RoutingDecision>(() => undefined);
+  }
+
+  async generate(request: LlmGenerateRequest): Promise<LlmGenerateResult> {
+    this.requests.push(request);
+    throw OpenAiHttpError.providerError("Generation should not start.");
+  }
+
+  async *stream(request: LlmGenerateRequest): AsyncIterable<LlmStreamChunk> {
+    this.streamRequests.push(request);
+    throw OpenAiHttpError.providerError("Final stream should not start.");
+    yield {
+      content: "",
+      finishReason: "stop",
+    };
+  }
+}
+
+class CloseAwareFinalStreamGenerationPort implements LlmGenerationPort {
+  readonly requests: LlmGenerateRequest[] = [];
+  readonly routingDecisionRequests: LlmRoutingDecisionRequest[] = [];
+  readonly streamRequests: LlmGenerateRequest[] = [];
+
+  async generateRoutingDecision(
+    request: LlmRoutingDecisionRequest,
+  ): Promise<RoutingDecision> {
+    this.routingDecisionRequests.push(request);
+    return createDefaultRoutingDecision(request);
+  }
+
+  async generate(request: LlmGenerateRequest): Promise<LlmGenerateResult> {
+    this.requests.push(request);
+    throw OpenAiHttpError.providerError("Generation should not start.");
+  }
+
+  async *stream(request: LlmGenerateRequest): AsyncIterable<LlmStreamChunk> {
+    this.streamRequests.push(request);
+    yield {
+      content: "first chunk",
+      finishReason: null,
+    };
+    await new Promise<void>(() => undefined);
   }
 }
 
@@ -901,6 +960,7 @@ describe("LLM orchestration routing", () => {
     expect(generation.streamRequests[0]).toMatchObject({
       role: "delegate",
       messages: [{ role: "user", content: "hello" }],
+      abortSignal: expect.any(AbortSignal),
     });
     expect(generation.streamRequests[0].internalTools).toBeUndefined();
     expect(generation.streamRequests[0].toolResults).toBeUndefined();
@@ -997,16 +1057,99 @@ describe("LLM orchestration routing", () => {
     }).rejects.toMatchObject({
       status: 502,
       code: "provider_error",
+      message: "Routing decision failed validation.",
     });
     expect(generation.streamRequests).toHaveLength(0);
   });
 
-  it("rejects text containing JSON as a malformed routing decision", async () => {
+  it("repairs a malformed routing decision with a second structured routing request", async () => {
+    const generation = new ScriptedGenerationPort(
+      [],
+      [["repaired answer"]],
+      [
+        '{"final_target":{"type":"delegate","target_model":"worker.fast","matched_capability":"general"}}' as unknown as RoutingDecision,
+        createRoutingDecision({
+          targetModel: "worker.fast",
+          matchedCapability: "general",
+        }),
+      ],
+    );
+    const service = new OrchestrationService(createConfigService(), generation);
+
+    const chunks = [];
+    for await (const chunk of service.streamFinal(
+      createRequest(routeModel, "hello"),
+      createRuntimeContext(),
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { content: "repaired answer", finishReason: null },
+      { content: "", finishReason: "stop" },
+    ]);
+    expect(generation.routingDecisionRequests).toHaveLength(2);
+    expect(generation.routingDecisionRequests[0].abortSignal).toEqual(
+      expect.any(AbortSignal),
+    );
+    expect(generation.routingDecisionRequests[1].abortSignal).toEqual(
+      expect.any(AbortSignal),
+    );
+    expect(generation.requests).toHaveLength(0);
+    expect(generation.streamRequests.map((request) => request.modelId)).toEqual(
+      ["worker.fast"],
+    );
+  });
+
+  it("repairs a routing validation error raised by the provider adapter", async () => {
+    const generation = new ScriptedGenerationPort(
+      [],
+      [["repaired answer"]],
+      [
+        Promise.reject(
+          OpenAiHttpError.providerError(
+            ROUTING_DECISION_VALIDATION_PUBLIC_MESSAGE,
+          ),
+        ),
+        createRoutingDecision({
+          targetModel: "worker.fast",
+          matchedCapability: "general",
+        }),
+      ],
+    );
+    const service = new OrchestrationService(createConfigService(), generation);
+
+    const chunks = [];
+    for await (const chunk of service.streamFinal(
+      createRequest(routeModel, "hello"),
+      createRuntimeContext(),
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { content: "repaired answer", finishReason: null },
+      { content: "", finishReason: "stop" },
+    ]);
+    expect(generation.routingDecisionRequests).toHaveLength(2);
+    expect(generation.requests).toHaveLength(0);
+    expect(generation.streamRequests.map((request) => request.modelId)).toEqual(
+      ["worker.fast"],
+    );
+  });
+
+  it("fails before final streaming when a malformed routing decision cannot be repaired", async () => {
     const generation = new ScriptedGenerationPort(
       [],
       [["should not stream"]],
       [
         '{"final_target":{"type":"delegate","target_model":"worker.fast","matched_capability":"general"}}' as unknown as RoutingDecision,
+        {
+          final_target: {
+            type: "delegate",
+            target_model: "worker.fast",
+          },
+        } as unknown as RoutingDecision,
       ],
     );
     const service = new OrchestrationService(createConfigService(), generation);
@@ -1021,7 +1164,9 @@ describe("LLM orchestration routing", () => {
     }).rejects.toMatchObject({
       status: 502,
       code: "provider_error",
+      message: "Routing decision failed validation.",
     });
+    expect(generation.routingDecisionRequests).toHaveLength(2);
     expect(generation.streamRequests).toHaveLength(0);
   });
 
@@ -1031,6 +1176,12 @@ describe("LLM orchestration routing", () => {
       [["should not stream"]],
       [
         '{"final_target":{"type":"delegate","target_model":"worker.fast","matched_capability":"general"}}' as unknown as RoutingDecision,
+        {
+          final_target: {
+            type: "delegate",
+            target_model: "worker.fast",
+          },
+        } as unknown as RoutingDecision,
       ],
     );
     const logger = new CapturingOperationalLogger();
@@ -1050,6 +1201,7 @@ describe("LLM orchestration routing", () => {
     }).rejects.toMatchObject({
       status: 502,
       code: "provider_error",
+      message: "Routing decision failed validation.",
     });
 
     expect(logger.events).toEqual(
@@ -1077,6 +1229,7 @@ describe("LLM orchestration routing", () => {
       ]),
     );
     expect(generation.streamRequests).toHaveLength(0);
+    expect(generation.routingDecisionRequests).toHaveLength(2);
   });
 
   it("fails before final streaming when the generation port cannot return structured routing decisions", async () => {
@@ -1421,6 +1574,7 @@ describe("LLM orchestration routing", () => {
       messages: [
         { role: "user", content: "write typescript code for a queue" },
       ],
+      abortSignal: expect.any(AbortSignal),
     });
     expect(generation.streamRequests[0].internalTools).toBeUndefined();
   });
@@ -1446,6 +1600,7 @@ describe("LLM orchestration routing", () => {
     }).rejects.toMatchObject({
       status: 502,
       code: "provider_error",
+      message: "Routing decision failed validation.",
     });
     expect(generation.streamRequests).toHaveLength(0);
   });
@@ -1624,6 +1779,7 @@ describe("LLM orchestration routing", () => {
     }).rejects.toMatchObject({
       status: 502,
       code: "provider_error",
+      message: "Routing decision failed validation.",
     });
     expect(generation.requests).toHaveLength(0);
     expect(generation.streamRequests).toHaveLength(0);
@@ -1670,6 +1826,7 @@ describe("LLM orchestration routing", () => {
     }).rejects.toMatchObject({
       status: 502,
       code: "provider_error",
+      message: "Routing decision failed validation.",
     });
     expect(generation.requests).toHaveLength(0);
     expect(generation.streamRequests).toHaveLength(0);
@@ -1780,6 +1937,53 @@ describe("LLM orchestration routing", () => {
     expect(generation.streamRequests.map((request) => request.modelId)).toEqual(
       ["worker.fast"],
     );
+    expect(generation.streamRequests[0].abortSignal?.aborted).toBe(true);
+  });
+
+  it("aborts the routing decision call when the route timeout elapses", async () => {
+    const generation = new NeverResolvingRoutingDecisionGenerationPort();
+    const service = new OrchestrationService(
+      createShortTotalTimeoutConfigService(),
+      generation,
+    );
+
+    await expect(async () => {
+      for await (const chunk of service.streamFinal(
+        createRequest(routeModel, "hello"),
+        createRuntimeContext(),
+      )) {
+        void chunk;
+      }
+    }).rejects.toMatchObject({
+      status: 408,
+      code: "timeout",
+    });
+
+    expect(generation.routingDecisionRequests).toHaveLength(1);
+    expect(generation.routingDecisionRequests[0].abortSignal?.aborted).toBe(
+      true,
+    );
+    expect(generation.streamRequests).toHaveLength(0);
+  });
+
+  it("aborts the final delegate stream when the consumer closes the iterator", async () => {
+    const generation = new CloseAwareFinalStreamGenerationPort();
+    const service = new OrchestrationService(createConfigService(), generation);
+    const stream = service.streamFinal(
+      createRequest(routeModel, "hello"),
+      createRuntimeContext(),
+    );
+    const iterator = stream[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: { content: "first chunk", finishReason: null },
+    });
+
+    await iterator.return?.();
+
+    expect(generation.streamRequests).toHaveLength(1);
+    expect(generation.streamRequests[0].abortSignal?.aborted).toBe(true);
   });
 
   it("stops waiting for pending parallel pre-final tasks after a terminal failure", async () => {
@@ -1964,6 +2168,7 @@ describe("LLM orchestration routing", () => {
     }).rejects.toMatchObject({
       status: 502,
       code: "provider_error",
+      message: "Routing decision failed validation.",
     });
     expect(generation.requests).toHaveLength(0);
     expect(generation.streamRequests).toHaveLength(0);

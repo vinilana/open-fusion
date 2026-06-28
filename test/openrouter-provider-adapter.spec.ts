@@ -210,6 +210,7 @@ describe("OpenRouter provider adapter", () => {
     ).rejects.toMatchObject({
       status: 502,
       code: "provider_error",
+      message: "Routing decision failed validation.",
     });
     expect(sdk.generateObjectCalls).toHaveLength(1);
     expect(sdk.generateTextCalls).toHaveLength(0);
@@ -255,6 +256,87 @@ describe("OpenRouter provider adapter", () => {
     expect(result.finishReason).toBe("tool_calls");
   });
 
+  it("drops malformed delegate_llm tool calls instead of partially normalizing arguments", async () => {
+    const sdk = createFakeSdk({
+      text: "",
+      finishReason: "tool-calls",
+      toolCalls: [
+        {
+          toolCallId: "empty_target",
+          toolName: "delegate_llm",
+          input: {
+            target_model: "",
+            task: "draft",
+          },
+        },
+        {
+          toolCallId: "empty_task",
+          toolName: "delegate_llm",
+          input: {
+            target_model: "worker.fast",
+            task: "",
+          },
+        },
+        {
+          toolCallId: "bad_optional",
+          toolName: "delegate_llm",
+          input: {
+            target_model: "worker.fast",
+            task: "draft",
+            reason: 123,
+          },
+        },
+        {
+          toolCallId: "bad_dependency",
+          toolName: "delegate_llm",
+          input: {
+            target_model: "worker.fast",
+            task: "draft",
+            depends_on: ["context", ""],
+          },
+        },
+        {
+          toolCallId: "valid",
+          toolName: "delegate_llm",
+          input: {
+            target_model: "worker.fast",
+            task: "draft",
+            output_contract: "Return markdown.",
+            reason: "fast",
+            task_id: "draft_task",
+            depends_on: ["context"],
+            final: false,
+          },
+        },
+      ],
+      totalUsage: usage(1, 1, 2),
+    });
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+
+    const result = await adapter.generate(
+      config.getProvider("openrouter")!,
+      config.findInternalModel("orchestrator.default")!,
+      createGenerateRequest("orchestrator.default"),
+    );
+
+    expect(result.toolCalls).toEqual([
+      {
+        id: "valid",
+        name: "delegate_llm",
+        arguments: {
+          target_model: "worker.fast",
+          task: "draft",
+          output_contract: "Return markdown.",
+          reason: "fast",
+          task_id: "draft_task",
+          depends_on: ["context"],
+          final: false,
+        },
+      },
+    ]);
+  });
+
   it("preserves valid provider-supplied delegate messages", async () => {
     const sdk = createFakeSdk({
       text: "",
@@ -294,7 +376,7 @@ describe("OpenRouter provider adapter", () => {
     ]);
   });
 
-  it("omits malformed provider-supplied delegate messages", async () => {
+  it("drops delegate_llm tool calls with malformed provider-supplied delegate messages", async () => {
     const sdk = createFakeSdk({
       text: "",
       finishReason: "tool-calls",
@@ -323,16 +405,7 @@ describe("OpenRouter provider adapter", () => {
       createGenerateRequest("orchestrator.default"),
     );
 
-    expect(result.toolCalls).toEqual([
-      {
-        id: "call_1",
-        name: "delegate_llm",
-        arguments: {
-          target_model: "worker.fast",
-          task: "draft",
-        },
-      },
-    ]);
+    expect(result.toolCalls).toBeUndefined();
   });
 
   it("registers the internal delegate_llm tool with the AI SDK when requested", async () => {
@@ -441,6 +514,24 @@ describe("OpenRouter provider adapter", () => {
     ]);
     expect(sdk.generateTextCalls[0]).not.toHaveProperty("tools");
     expect(sdk.streamTextCalls[0]).not.toHaveProperty("tools");
+
+    const generateMessages = JSON.stringify(
+      (sdk.generateTextCalls[0] as { messages?: unknown }).messages,
+    );
+    const streamMessages = JSON.stringify(
+      (sdk.streamTextCalls[0] as { messages?: unknown }).messages,
+    );
+    [generateMessages, streamMessages].forEach((messages) => {
+      expect(messages).toContain("delegate result");
+      expect(messages).not.toContain("worker.fast");
+      expect(messages).not.toContain("draft");
+      expect(messages).not.toContain("Model:");
+      expect(messages).not.toContain("Task:");
+      expect(messages).not.toContain("Status:");
+      expect(messages).not.toContain("LatencyMs");
+      expect(messages).not.toContain("FinishReason");
+      expect(messages).not.toContain("Usage:");
+    });
   });
 
   it("streams text chunks through the OpenRouter AI SDK path", async () => {
@@ -479,6 +570,59 @@ describe("OpenRouter provider adapter", () => {
       timeout: 30000,
     });
   });
+
+  it.each(["error", "other", "unknown"])(
+    "converts %s generate finish reason into a normalized provider failure",
+    async (finishReason) => {
+      const sdk = createFakeSdk({
+        text: "ambiguous answer",
+        finishReason,
+        totalUsage: usage(1, 1, 2),
+      });
+      const adapter = new OpenRouterAdapter(sdk);
+      const config = createConfig();
+
+      await expect(
+        adapter.generate(
+          config.getProvider("openrouter")!,
+          config.findInternalModel("worker.fast")!,
+          createGenerateRequest("worker.fast"),
+        ),
+      ).rejects.toMatchObject({
+        status: 502,
+        code: "provider_error",
+      });
+    },
+  );
+
+  it.each(["error", "other", "unknown"])(
+    "converts %s stream finish reason into a normalized provider failure",
+    async (streamFinishReason) => {
+      const sdk = createFakeSdk({
+        text: "unused",
+        finishReason: "stop",
+        totalUsage: usage(0, 0, 0),
+        streamChunks: ["partial"],
+        streamFinishReason,
+        streamUsage: usage(1, 1, 2),
+      });
+      const adapter = new OpenRouterAdapter(sdk);
+      const config = createConfig();
+
+      await expect(async () => {
+        for await (const chunk of adapter.stream(
+          config.getProvider("openrouter")!,
+          config.findInternalModel("worker.fast")!,
+          createGenerateRequest("worker.fast"),
+        )) {
+          void chunk;
+        }
+      }).rejects.toMatchObject({
+        status: 502,
+        code: "provider_error",
+      });
+    },
+  );
 
   it("passes abort signals through to OpenRouter stream calls", async () => {
     const sdk = createFakeSdk({
@@ -544,6 +688,46 @@ describe("OpenRouter provider adapter", () => {
     });
     expect(sdk.streamTextCalls[0]).toMatchObject({
       system: expect.stringContaining("client system"),
+    });
+  });
+
+  it("preserves normalized OpenAI HTTP errors from SDK calls", async () => {
+    const normalizedError = OpenAiHttpError.timeout("Known timeout.");
+    const sdk = createFakeSdk(normalizedError);
+    const adapter = new OpenRouterAdapter(sdk);
+    const config = createConfig();
+
+    await expect(
+      adapter.generate(
+        config.getProvider("openrouter")!,
+        config.findInternalModel("worker.fast")!,
+        createGenerateRequest("worker.fast"),
+      ),
+    ).rejects.toMatchObject({
+      status: 408,
+      code: "timeout",
+    });
+    await expect(
+      adapter.generateRoutingDecision(
+        config.getProvider("openrouter")!,
+        config.findInternalModel("orchestrator.default")!,
+        createRoutingDecisionRequest("orchestrator.default"),
+      ),
+    ).rejects.toMatchObject({
+      status: 408,
+      code: "timeout",
+    });
+    await expect(async () => {
+      for await (const chunk of adapter.stream(
+        config.getProvider("openrouter")!,
+        config.findInternalModel("worker.fast")!,
+        createGenerateRequest("worker.fast"),
+      )) {
+        void chunk;
+      }
+    }).rejects.toMatchObject({
+      status: 408,
+      code: "timeout",
     });
   });
 

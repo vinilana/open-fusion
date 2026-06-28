@@ -16,6 +16,7 @@ Logs estruturados devem incluir:
 
 - `requestId`;
 - cliente autenticado;
+- metodo e path HTTP para eventos genericos de `/v1/*`;
 - rota publica;
 - orquestrador usado;
 - modelos delegados chamados;
@@ -87,6 +88,8 @@ Nao e requisito inicial armazenar historico em banco.
 - Falhas de provider retornam erro normalizado.
 - Segredos sao mascarados em logs.
 - Limites de timeout e delegacao sao aplicados.
+- `GET /health/live` e `GET /health/ready` respondem sem autenticacao e nao fazem chamadas pagas a providers.
+- Falhas de autenticacao em `/v1/*` e chamadas a `/v1/models` geram logs estruturados genericos sem tokens ou bodies completos.
 
 ## ADRs relacionados
 

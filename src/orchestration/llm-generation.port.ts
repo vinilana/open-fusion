@@ -1,6 +1,8 @@
 import { ChatCompletionMessage } from "../v1/openai-types";
 
 export const LLM_GENERATION_PORT = "LLM_GENERATION_PORT";
+export const ROUTING_DECISION_VALIDATION_PUBLIC_MESSAGE =
+  "Routing decision failed validation.";
 
 export type LlmInvocationRole = "orchestrator" | "delegate";
 export type LlmFinishReason =
