@@ -953,6 +953,92 @@ describe("LLM orchestration routing", () => {
     },
   );
 
+  it("chooses the plan delegate for a planning request that includes html technology terms", async () => {
+    const generation = new ScriptedGenerationPort(
+      [
+        {
+          content: "orchestrator planning text must not be streamed",
+          finishReason: "stop",
+        },
+      ],
+      [["plan delegate answer"]],
+    );
+    const service = new OrchestrationService(
+      createCanonicalCapabilityConfigService(),
+      generation,
+    );
+
+    const chunks = [];
+    for await (const chunk of service.streamFinal(
+      createRequest(
+        routeModel,
+        "crie um plano para desenvolver um pagina html com um jogo estilo minecraft",
+      ),
+      createRuntimeContext(),
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { content: "plan delegate answer", finishReason: null },
+      { content: "", finishReason: "stop" },
+    ]);
+    expect(generation.streamRequests.map((request) => request.modelId)).toEqual([
+      "worker.plan",
+    ]);
+    expect(generation.streamRequests[0]).toMatchObject({
+      role: "delegate",
+      messages: [{ role: "user", content: "crie um plano para desenvolver um pagina html com um jogo estilo minecraft" }],
+    });
+  });
+
+  it("classifies plan intent even when previous assistant content contains code terms", async () => {
+    const generation = new ScriptedGenerationPort(
+      [
+        {
+          content: "orchestrator planning text must not be streamed",
+          finishReason: "stop",
+        },
+      ],
+      [["plan delegate answer"]],
+    );
+    const service = new OrchestrationService(
+      createCanonicalCapabilityConfigService(),
+      generation,
+    );
+
+    const request = {
+      model: routeModel,
+      messages: [
+        {
+          role: "assistant" as const,
+          content:
+            "Aqui está um exemplo em JavaScript com HTML/CSS: function render() { return <div />; }",
+        },
+        {
+          role: "user" as const,
+          content: "crie um plano para viajar do brasil para eua",
+        },
+      ],
+    };
+
+    const chunks = [];
+    for await (const chunk of service.streamFinal(
+      request,
+      createRuntimeContext(),
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { content: "plan delegate answer", finishReason: null },
+      { content: "", finishReason: "stop" },
+    ]);
+    expect(generation.streamRequests.map((request) => request.modelId)).toEqual([
+      "worker.plan",
+    ]);
+  });
+
   it("corrects a streaming final target when the orchestrator chooses a delegate without the classified capability", async () => {
     const generation = new ScriptedGenerationPort(
       [
